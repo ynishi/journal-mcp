@@ -195,6 +195,10 @@ pub struct TransitionSpec {
 struct RawFileProjection {
     #[serde(default)]
     section_order: Vec<String>,
+    #[serde(default)]
+    chapter_header: Option<String>,
+    #[serde(default)]
+    section_header: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -239,6 +243,8 @@ pub struct ChapterSchema {
     transitions: Vec<TransitionSpec>,
     sections: HashMap<String, SectionSpec>,
     section_order: Vec<String>,
+    chapter_header: Option<String>,
+    section_header: Option<String>,
 }
 
 impl ChapterSchema {
@@ -287,11 +293,11 @@ impl ChapterSchema {
             }
         }
 
-        // --- extract render.file_projection.section_order ---
-        let section_order = raw
+        // --- extract render.file_projection fields ---
+        let (section_order, chapter_header, section_header) = raw
             .render
             .and_then(|r| r.file_projection)
-            .map(|fp| fp.section_order)
+            .map(|fp| (fp.section_order, fp.chapter_header, fp.section_header))
             .unwrap_or_default();
 
         Ok(ChapterSchema {
@@ -301,6 +307,8 @@ impl ChapterSchema {
             transitions,
             sections,
             section_order,
+            chapter_header,
+            section_header,
         })
     }
 
@@ -337,6 +345,24 @@ impl ChapterSchema {
     /// Returns an empty slice for schemas that do not declare a render block.
     pub fn section_order(&self) -> &[String] {
         &self.section_order
+    }
+
+    /// Chapter-level header template from `render.file_projection.chapter_header`.
+    ///
+    /// Returns `None` for schemas that do not declare a `chapter_header` in
+    /// their render block.  The template may contain `{date}` and `{name}`
+    /// placeholders.
+    pub fn chapter_header(&self) -> Option<&str> {
+        self.chapter_header.as_deref()
+    }
+
+    /// Section-level header template from `render.file_projection.section_header`.
+    ///
+    /// Returns `None` for schemas that do not declare a `section_header` in
+    /// their render block.  The template may contain a `{section_name}`
+    /// placeholder.
+    pub fn section_header(&self) -> Option<&str> {
+        self.section_header.as_deref()
     }
 
     /// The id of the initial state, if one is declared.
