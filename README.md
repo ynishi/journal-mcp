@@ -18,7 +18,7 @@ Project の **正史** (= 判断 + 検証の流れ、 「再開・中断・路�
 
 ## Status
 
-**WIP — implementation in progress (ST2 complete)**. ST1 (EventLog SQLite primitive) and ST2 (ChapterSchema parser + SchemaRegistry + built-in schema embed) are implemented and tested. ST3 and beyond are pending.
+**WIP — implementation in progress (ST3 complete)**. ST1 (EventLog SQLite primitive), ST2 (ChapterSchema parser + SchemaRegistry + built-in schema embed), and ST3 (JournalCore schema-driven state transition engine + ChapterHandle typestate) are implemented and tested. ST4 and beyond are pending.
 
 See `docs/design.md` for the full design specification. See `CHANGELOG.md` for what has been implemented.
 
@@ -36,11 +36,14 @@ journal-mcp/
 │   │   ├── src/
 │   │   │   ├── lib.rs
 │   │   │   ├── event_log.rs   # ST1: EventLog SQLite primitive (append-only SoT)
-│   │   │   ├── schema.rs      # ST2: ChapterSchema YAML parser + SchemaError
-│   │   │   └── registry.rs    # ST2: SchemaRegistry two-layer resolver (L1 built-in / L2 project-local)
+│   │   │   ├── schema.rs      # ST2: ChapterSchema YAML parser + SchemaError; ST3: runtime helpers (transition/section/run_hooks) + HookSpec/HookAction/HookWarning
+│   │   │   ├── registry.rs    # ST2: SchemaRegistry two-layer resolver (L1 built-in / L2 project-local)
+│   │   │   ├── core.rs        # ST3: JournalCore schema-driven state transition engine
+│   │   │   └── handle.rs      # ST3: ChapterHandle<S: ChapterState> compile-time typestate guard (BP-6.2)
 │   │   └── tests/
 │   │       ├── event_log_test.rs       # ST1: 3 integration tests
-│   │       └── schema_registry_test.rs # ST2: 3 integration tests
+│   │       ├── schema_registry_test.rs # ST2: 3 integration tests
+│   │       └── journal_core_test.rs    # ST3: 4 integration tests (T1 happy path / T2 AppendOnce / T3 close requires / T4 hook keyword_detect)
 │   └── journal-mcp/       # stdio MCP server binary (pending ST4+)
 ├── docs/
 │   └── design.md          # design specification (this is the SoT)
