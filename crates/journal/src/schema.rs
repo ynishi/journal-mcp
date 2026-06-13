@@ -12,7 +12,7 @@ use thiserror::Error;
 // Error type
 // ---------------------------------------------------------------------------
 
-/// Errors that can occur while parsing a [`ChapterSchema`] from YAML.
+/// Errors that can occur while parsing or querying a [`ChapterSchema`].
 #[derive(Debug, Error)]
 pub enum SchemaError {
     /// YAML syntax or structure error.
@@ -21,6 +21,7 @@ pub enum SchemaError {
 
     /// A transition's `requires.sections_present` or `sections_non_empty`
     /// references a section name that is not declared in `sections`.
+    /// Used exclusively during `parse_str` validation.
     #[error("unknown section '{section}' in schema '{schema_id}'")]
     UnknownSection { schema_id: String, section: String },
 
@@ -33,6 +34,14 @@ pub enum SchemaError {
     /// recognised values.
     #[error("invalid append_policy '{value}' in section '{section}'")]
     InvalidAppendPolicy { section: String, value: String },
+
+    /// No transition exists from `current` state on event `event` at runtime.
+    #[error("no transition from state '{current}' on event '{event}'")]
+    NoTransition { current: String, event: String },
+
+    /// The named section does not exist in this schema at runtime.
+    #[error("section '{section}' not found in schema '{schema_id}'")]
+    SectionNotFound { schema_id: String, section: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -55,6 +64,63 @@ pub enum AppendPolicy {
     ReplaceForbidden,
 }
 
+// ---------------------------------------------------------------------------
+// Hook types
+// ---------------------------------------------------------------------------
+
+/// A hook action that can be attached to section append events.
+///
+/// Currently only `KeywordDetect` is implemented; other variants are reserved
+/// for future extensions (ST3 spec: literal `body.contains` only).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HookAction {
+    /// Scan the appended body for literal substring matches.
+    ///
+    /// # Fields
+    ///
+    /// * `patterns` — list of literal substrings to search for.
+    /// * `response` — warning kind string (e.g. `"warn_carryover"`).
+    KeywordDetect {
+        /// Literal substrings to match against the appended body.
+        patterns: Vec<String>,
+        /// Warning kind emitted when any pattern matches.
+        response: String,
+    },
+}
+
+/// A hook declaration on a section: fires when a section is appended.
+///
+/// # Fields
+///
+/// * `on_append` — the action to execute on each append.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HookSpec {
+    /// Action executed when a section row is appended.
+    pub on_append: HookAction,
+}
+
+/// A warning emitted by a hook when its condition is satisfied.
+///
+/// # Fields
+///
+/// * `kind` — warning category (e.g. `"warn_carryover"`).
+/// * `section` — section that triggered the hook.
+/// * `hint` — matched patterns joined by `", "`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookWarning {
+    /// Warning kind, taken from [`HookAction::KeywordDetect`]'s `response` field.
+    pub kind: String,
+    /// Name of the section that triggered this warning.
+    pub section: String,
+    /// Comma-separated list of matched patterns.
+    pub hint: String,
+}
+
+// ---------------------------------------------------------------------------
+// Section spec
+// ---------------------------------------------------------------------------
+
 /// Per-section policy declaration parsed from a schema YAML.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SectionSpec {
@@ -71,6 +137,13 @@ pub struct SectionSpec {
 
     /// Human-readable description of the section's purpose.
     pub description: Option<String>,
+
+    /// Hooks fired when a row is appended to this section.
+    ///
+    /// Defaults to an empty list for sections that declare no hooks, which
+    /// ensures backwards-compatible deserialisation of existing YAML files.
+    #[serde(default)]
+    pub hooks: Vec<HookSpec>,
 }
 
 /// A single state in the chapter state machine.
@@ -272,5 +345,106 @@ impl ChapterSchema {
             .iter()
             .find(|s| s.initial)
             .map(|s| s.id.as_str())
+    }
+
+    // -----------------------------------------------------------------------
+    // Runtime helpers (ST3 additions)
+    // -----------------------------------------------------------------------
+
+    /// Look up the first matching state-machine transition for `(current, event)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `current` — the chapter's current state id.
+    /// * `event` — the event name triggering the transition (e.g. `"append_section"`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaError::NoTransition`] when no transition matches
+    /// `from == current && on == event`.
+    pub fn transition(&self, current: &str, event: &str) -> Result<&TransitionSpec, SchemaError> {
+        self.transitions
+            .iter()
+            .find(|t| t.from == current && t.on == event)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    target: "journal::schema",
+                    current,
+                    event,
+                    schema_id = %self.schema_id,
+                    "transition: no matching transition found"
+                );
+                SchemaError::NoTransition {
+                    current: current.to_owned(),
+                    event: event.to_owned(),
+                }
+            })
+    }
+
+    /// Look up a section spec by name.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` — section name (e.g. `"Verified"`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaError::SectionNotFound`] when the section is absent.
+    pub fn section(&self, name: &str) -> Result<&SectionSpec, SchemaError> {
+        self.sections.get(name).ok_or_else(|| {
+            tracing::warn!(
+                target: "journal::schema",
+                section = name,
+                schema_id = %self.schema_id,
+                "section: section not found"
+            );
+            SchemaError::SectionNotFound {
+                schema_id: self.schema_id.clone(),
+                section: name.to_owned(),
+            }
+        })
+    }
+
+    /// Execute all hooks declared on a section for an appended body.
+    ///
+    /// Only [`HookAction::KeywordDetect`] is implemented; it performs literal
+    /// substring matching (`body.contains(pattern)`).  Unknown hook variants
+    /// and sections without hooks return an empty list.
+    ///
+    /// # Arguments
+    ///
+    /// * `section_name` — name of the section being appended.
+    /// * `body` — the text content being appended.
+    ///
+    /// # Returns
+    ///
+    /// A (possibly empty) list of [`HookWarning`]s, one per hook whose
+    /// condition matched.
+    pub fn run_hooks(&self, section_name: &str, body: &str) -> Vec<HookWarning> {
+        let spec = match self.sections.get(section_name) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+
+        let mut warnings = Vec::new();
+        for hook in &spec.hooks {
+            match &hook.on_append {
+                HookAction::KeywordDetect { patterns, response } => {
+                    let matched: Vec<&str> = patterns
+                        .iter()
+                        .filter(|p| body.contains(p.as_str()))
+                        .map(String::as_str)
+                        .collect();
+                    if !matched.is_empty() {
+                        warnings.push(HookWarning {
+                            kind: response.clone(),
+                            section: section_name.to_owned(),
+                            hint: matched.join(", "),
+                        });
+                    }
+                }
+            }
+        }
+        warnings
     }
 }
