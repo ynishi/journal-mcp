@@ -1,0 +1,14 @@
+schema_id: madr
+version: 1
+sections:
+  Context: { required: true, append_policy: append-only-chain }
+  Decision: { required: true, append_policy: append-only-chain }
+  Consequences: { required: true, append_policy: append-only-chain }
+  "Considered Options": { required: false }
+  "Pros and Cons": { required: false }
+transitions:
+  - from: appending
+    to: closed
+    on: close_chapter
+    requires:
+      sections_present: [Context, Decision, Consequences]
