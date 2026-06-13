@@ -22,6 +22,7 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::event_log::{EventLog, EventLogError};
+use crate::projection::{JournalProjection, ProjectionError};
 use crate::registry::{RegistryError, SchemaRegistry};
 use crate::schema::{AppendPolicy, HookWarning, SchemaError};
 use crate::ChapterId;
@@ -44,6 +45,10 @@ pub enum JournalError {
     /// Wraps a [`RegistryError`] from the schema registry.
     #[error("registry error: {0}")]
     Registry(#[from] RegistryError),
+
+    /// Wraps a [`ProjectionError`] from a derived-view projection.
+    #[error("projection error: {0}")]
+    Projection(#[from] ProjectionError),
 
     /// The requested schema id is not present in the registry.
     #[error("schema not found: {schema_id}")]
@@ -102,14 +107,18 @@ pub enum JournalError {
 ///
 /// # Fields
 ///
-/// Only two fields are permitted (Crux: JournalCore schema-only interpretation
+/// Three fields are permitted (Crux: JournalCore schema-only interpretation
 /// boundary):
 ///
 /// * `log` — the append-only SQLite event store.
 /// * `registry` — the in-memory schema registry.
+/// * `projections` — derived-view consumers (`Vec<Box<dyn JournalProjection>>`).
+///   Projections hold no SoT of their own; they are fully reconstructible from
+///   EventLog replay.
 pub struct JournalCore {
     log: EventLog,
     registry: SchemaRegistry,
+    projections: Vec<Box<dyn JournalProjection>>,
 }
 
 impl JournalCore {
@@ -133,7 +142,11 @@ impl JournalCore {
             );
             e
         })?;
-        Ok(Self { log, registry })
+        Ok(Self {
+            log,
+            registry,
+            projections: Vec::new(),
+        })
     }
 
     /// Open a new chapter under `name` governed by `schema_id`.
@@ -178,6 +191,20 @@ impl JournalCore {
         // self.log.append_chapter_open; no direct SQL here.
         self.log.append_chapter_open(name, schema_id, initial)?;
         Ok(ChapterId(name.to_owned()))
+    }
+
+    /// Register a projection that will receive dispatch callbacks.
+    ///
+    /// After registration, `p.mark_dirty` is called after each
+    /// `append_section` and `p.rebuild_chapter` is called after each
+    /// `close_chapter`.
+    ///
+    /// # Arguments
+    ///
+    /// * `p` — a concrete type implementing [`JournalProjection`] with a
+    ///   `'static` lifetime (required by `Box<dyn Trait>`).
+    pub fn add_projection<P: JournalProjection + 'static>(&mut self, p: P) {
+        self.projections.push(Box::new(p));
     }
 
     /// Append a section row to an existing chapter.
@@ -304,6 +331,19 @@ impl JournalCore {
                 e
             })?;
 
+        // Dispatch to registered projections.
+        for p in &mut self.projections {
+            p.mark_dirty(id).map_err(|e| {
+                tracing::warn!(
+                    target: "journal::core",
+                    error = ?e,
+                    chapter_id = %id,
+                    "append_section: projection.mark_dirty failed"
+                );
+                e
+            })?;
+        }
+
         Ok(warnings)
     }
 
@@ -387,6 +427,31 @@ impl JournalCore {
             e
         })?;
 
+        // Re-fetch the full replay after close so projections receive the
+        // complete chapter including the close event.
+        let final_replay = self.log.chapter(id).map_err(|e| {
+            tracing::warn!(
+                target: "journal::core",
+                error = ?e,
+                chapter_id = %id,
+                "close_chapter: projection replay fetch failed"
+            );
+            e
+        })?;
+
+        // Dispatch to registered projections.
+        for p in &mut self.projections {
+            p.rebuild_chapter(&final_replay).map_err(|e| {
+                tracing::warn!(
+                    target: "journal::core",
+                    error = ?e,
+                    chapter_id = %id,
+                    "close_chapter: projection.rebuild_chapter failed"
+                );
+                e
+            })?;
+        }
+
         Ok(())
     }
 
@@ -465,5 +530,109 @@ fn body_is_empty(payload: &str) -> bool {
     match v.get("body").and_then(|b| b.as_str()) {
         Some(s) => s.trim().is_empty(),
         None => true,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests — dispatch wiring
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::projection::private;
+    use crate::{ChapterId, ChapterReplay};
+
+    // -----------------------------------------------------------------------
+    // TestProjection — observable counter for dispatch calls
+    // -----------------------------------------------------------------------
+
+    struct TestProjection {
+        mark_count: Arc<AtomicUsize>,
+        rebuild_count: Arc<AtomicUsize>,
+    }
+
+    // Crux: impl private::Sealed here is permitted because core.rs is within
+    // the `journal` crate, and `projection::private` is `pub(crate)`.
+    impl private::Sealed for TestProjection {}
+
+    impl JournalProjection for TestProjection {
+        fn mark_dirty(&mut self, _id: &ChapterId) -> Result<(), ProjectionError> {
+            self.mark_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn rebuild_chapter(&mut self, _replay: &ChapterReplay) -> Result<(), ProjectionError> {
+            self.rebuild_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Build a `JournalCore` backed by a temporary SQLite database.
+    ///
+    /// Returns `(JournalCore, tempfile::TempDir)`.  The `TempDir` must be kept
+    /// alive for the duration of the test.
+    fn make_core_for_test() -> (JournalCore, tempfile::TempDir) {
+        // SAFETY: TempDir is kept alive by being returned to the caller.
+        let dir = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let db_path = dir.path().join(".journal_dispatch.db");
+        let registry =
+            crate::registry::SchemaRegistry::new().expect("SchemaRegistry::new should succeed");
+        let core = JournalCore::open(&db_path, registry).expect("JournalCore::open should succeed");
+        (core, dir)
+    }
+
+    /// T3 — dispatch wiring: projection callbacks are fired for append_section
+    /// and close_chapter.
+    ///
+    /// Verifies:
+    /// - `mark_dirty` is called once per `append_section` call.
+    /// - `rebuild_chapter` is called once per `close_chapter` call.
+    #[test]
+    fn test_dispatch_wiring() {
+        let (mut core, _dir) = make_core_for_test();
+
+        let mark_count = Arc::new(AtomicUsize::new(0));
+        let rebuild_count = Arc::new(AtomicUsize::new(0));
+
+        core.add_projection(TestProjection {
+            mark_count: Arc::clone(&mark_count),
+            rebuild_count: Arc::clone(&rebuild_count),
+        });
+
+        let id = core
+            .open_chapter("2026-06-14", "ytk-canonical-v1")
+            .expect("open_chapter should succeed");
+
+        // Five required sections (schema: ytk-canonical-v1).
+        let sections = ["Verified", "Done", "Decided", "Not Done", "Issues touched"];
+        for &s in &sections {
+            core.append_section(&id, s, "content")
+                .expect("append_section should succeed");
+        }
+        // Each append should have triggered mark_dirty once.
+        assert_eq!(
+            mark_count.load(Ordering::SeqCst),
+            5,
+            "mark_dirty should be called once per append_section"
+        );
+        assert_eq!(
+            rebuild_count.load(Ordering::SeqCst),
+            0,
+            "rebuild_chapter should not be called before close"
+        );
+
+        core.close_chapter(&id)
+            .expect("close_chapter should succeed");
+
+        // close_chapter should trigger rebuild_chapter exactly once.
+        assert_eq!(
+            rebuild_count.load(Ordering::SeqCst),
+            1,
+            "rebuild_chapter should be called once after close_chapter"
+        );
     }
 }

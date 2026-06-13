@@ -1,0 +1,124 @@
+//! `JournalProjection` sealed trait — derived-view dispatch for journal chapters.
+//!
+//! # Design
+//!
+//! [`JournalProjection`] is a sealed trait (BP-6.1) that `JournalCore` calls
+//! after each `append_section` and `close_chapter` to keep derived views
+//! (e.g. rendered markdown files) in sync with the canonical [`EventLog`].
+//!
+//! # Sealed trait
+//!
+//! Only types within this crate can implement [`JournalProjection`].  External
+//! crates cannot satisfy the [`private::Sealed`] super-trait requirement:
+//!
+//! ```compile_fail
+//! use journal::JournalProjection;
+//! struct External;
+//! impl JournalProjection for External {
+//!     fn mark_dirty(
+//!         &mut self,
+//!         _id: &journal::ChapterId,
+//!     ) -> Result<(), journal::ProjectionError> {
+//!         Ok(())
+//!     }
+//!     fn rebuild_chapter(
+//!         &mut self,
+//!         _replay: &journal::ChapterReplay,
+//!     ) -> Result<(), journal::ProjectionError> {
+//!         Ok(())
+//!     }
+//! }
+//! ```
+//!
+//! [`EventLog`]: crate::EventLog
+
+pub mod file;
+
+pub use file::FileProjection;
+
+// ---------------------------------------------------------------------------
+// Sealed module (Crux: Sealed trait 外部 impl 禁止境界)
+// ---------------------------------------------------------------------------
+
+/// Sealing supertrait — crate-internal only, invisible to external crates.
+///
+/// `pub(crate)` allows implementations within any module of this crate
+/// (including `projection::file`) while remaining invisible to downstream
+/// crates, which preserves the sealed-trait invariant.
+pub(crate) mod private {
+    /// Marker trait that seals [`super::JournalProjection`].
+    ///
+    /// Only types within this crate can implement `Sealed`, because `private`
+    /// is crate-private.  External crates cannot name this trait.
+    pub trait Sealed {}
+}
+
+// ---------------------------------------------------------------------------
+// ProjectionError
+// ---------------------------------------------------------------------------
+
+/// Errors returned by [`JournalProjection`] methods.
+///
+/// Currently only wraps [`std::io::Error`], which is reserved for the file-IO
+/// path that `FileProjection` will use in ST5.  ST4 does not produce IO errors
+/// at runtime.
+#[derive(Debug, thiserror::Error)]
+pub enum ProjectionError {
+    /// An IO error, returned by file-based projections (ST5+).
+    // ST4: this variant is defined for future ST5 use; no code path
+    // reaches it yet.  The allow attribute is removed once ST5 wires
+    // actual file IO.
+    #[allow(dead_code)]
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+// ---------------------------------------------------------------------------
+// JournalProjection trait (sealed)
+// ---------------------------------------------------------------------------
+
+/// A derived-view consumer that `JournalCore` notifies after each chapter
+/// mutation.
+///
+/// Implementations receive two callbacks:
+///
+/// * [`mark_dirty`](JournalProjection::mark_dirty) — called after a section is
+///   appended; records that the chapter's derived view is stale.
+/// * [`rebuild_chapter`](JournalProjection::rebuild_chapter) — called after a
+///   chapter is closed; reconstructs the derived view from the full replay.
+///
+/// # Sealed
+///
+/// This trait is sealed (see the module-level doc).  Only types inside the
+/// `journal` crate may implement it.
+pub trait JournalProjection: private::Sealed {
+    /// Mark the chapter identified by `id` as requiring a rebuild.
+    ///
+    /// Called by [`JournalCore::append_section`] after a successful
+    /// `EventLog` write.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` — the chapter whose derived view has become stale.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectionError`] on IO failure (ST5+); ST4 always returns
+    /// `Ok(())`.
+    fn mark_dirty(&mut self, id: &crate::ChapterId) -> Result<(), ProjectionError>;
+
+    /// Rebuild the derived view for the chapter described by `replay`.
+    ///
+    /// Called by [`JournalCore::close_chapter`] after a successful
+    /// `EventLog::append_close` write, passing the complete post-close replay.
+    ///
+    /// # Arguments
+    ///
+    /// * `replay` — full chapter replay including the close event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectionError`] on IO failure (ST5+); ST4 stubs return
+    /// `Ok(())` after clearing the dirty flag.
+    fn rebuild_chapter(&mut self, replay: &crate::ChapterReplay) -> Result<(), ProjectionError>;
+}

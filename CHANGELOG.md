@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `crates/journal/src/projection.rs`: sealed `JournalProjection` trait implementing design.md §4
+  - `pub(crate) mod private { pub trait Sealed {} }` — sealing mechanism; external crates cannot
+    implement `JournalProjection` (the `private` module is not visible outside the `journal` crate)
+  - `pub trait JournalProjection: private::Sealed` with two required methods:
+    `mark_dirty(&mut self, id: &ChapterId) -> Result<(), ProjectionError>` and
+    `rebuild_chapter(&mut self, replay: &ChapterReplay) -> Result<(), ProjectionError>`
+  - `pub enum ProjectionError` via `thiserror::Error` derive with `Io(#[from] std::io::Error)` variant
+    (unused in ST4; reserved for ST5 file IO paths; suppressed with `#[allow(dead_code)]`)
+  - `compile_fail` doctest verifying that `impl JournalProjection for ExternalType {}` is a
+    compile error (follows `handle.rs` sealed trait guard pattern)
+- `crates/journal/src/projection/file.rs`: `FileProjection` skeleton implementing design.md §8.2
+  - `pub struct FileProjection { dirty: std::collections::HashSet<ChapterId> }` — dirty-chapter
+    tracking; rebuild content is ST5 scope only (Crux constraint: no file IO or template render
+    in ST4)
+  - `pub fn new() -> Self` — constructs an empty `FileProjection`
+  - `pub fn dirty_chapters(&self) -> &HashSet<ChapterId>` — accessor for test inspection
+  - `impl private::Sealed for FileProjection {}` — satisfies sealed trait requirement via
+    `pub(crate)` visibility of `projection::private`
+  - `impl JournalProjection for FileProjection`: `mark_dirty` inserts the chapter id into the
+    dirty set; `rebuild_chapter` removes the chapter id from the dirty set and returns `Ok(())`
+    stub (full file reconstruction deferred to ST5)
+- `crates/journal/src/core.rs`: `JournalCore` projection dispatch wiring (design.md §7)
+  - `projections: Vec<Box<dyn JournalProjection>>` field added to `JournalCore`; initialized as
+    `Vec::new()` in `JournalCore::open`
+  - `pub fn add_projection<P: JournalProjection + 'static>(&mut self, p: P)` — registers a
+    projection; boxed and appended to the `projections` vec
+  - `append_section`: dispatch loop calling `p.mark_dirty(id)?` for each projection immediately
+    before returning `Ok(warnings)`
+  - `close_chapter`: replays the final chapter state via `self.log.chapter(id)?` after the close
+    write, then calls `p.rebuild_chapter(&final_replay)?` for each projection immediately before
+    returning `Ok(())`
+  - `JournalError::Projection(#[from] ProjectionError)` variant added; all dispatch errors
+    propagate via `?` with `tracing::warn!` on error
+  - `#[cfg(test)] struct TestProjection` with `AtomicUsize` counters for `mark_dirty_calls` and
+    `rebuild_calls`, plus `impl private::Sealed for TestProjection {}` — used to verify dispatch
+    wiring in integration tests
+- `crates/journal/src/lib.rs`: `pub mod projection` declaration and re-exports
+  (`FileProjection`, `JournalProjection`, `ProjectionError`)
+- `crates/journal/tests/projection_test.rs`: integration tests for ST4
+  - `test_file_projection_mark_dirty_and_rebuild` (T2 / property test) — constructs
+    `FileProjection` directly, calls `mark_dirty`, asserts chapter id appears in
+    `dirty_chapters()`, calls `rebuild_chapter`, asserts the id is removed
+  - `test_core_dispatch_wiring` (T3 / dispatch test) — attaches `TestProjection` to `JournalCore`
+    via `add_projection`, runs `open_chapter` → `append_section` → `close_chapter`, asserts
+    `mark_dirty_calls == 1` and `rebuild_calls == 1`
+
 - `crates/journal`: new crate `journal` — project canonical history primitive
 - `crates/journal/src/event_log.rs`: `EventLog` SQLite primitive implementing design.md §8.1
   - `event_log` table (7 columns, STRICT) with `BEFORE UPDATE` / `BEFORE DELETE` triggers that
