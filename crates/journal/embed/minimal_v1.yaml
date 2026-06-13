@@ -1,0 +1,8 @@
+schema_id: minimal
+version: 1
+sections: {}   # 必須なし
+transitions:
+  - from: appending
+    to: closed
+    on: close_chapter
+    requires: {}    # 制約なしで close 可能
