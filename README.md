@@ -18,9 +18,9 @@ Project の **正史** (= 判断 + 検証の流れ、 「再開・中断・路�
 
 ## Status
 
-**WIP — design phase (v3)**. Implementation has not started.
+**WIP — implementation in progress (ST1 complete)**. ST1 (EventLog SQLite primitive) is implemented and tested. ST2 (ChapterSchema) and beyond are pending.
 
-See `docs/design.md` for the full design specification.
+See `docs/design.md` for the full design specification. See `CHANGELOG.md` for what has been implemented.
 
 ## Layout
 
@@ -28,8 +28,13 @@ See `docs/design.md` for the full design specification.
 journal-mcp/
 ├── Cargo.toml             # workspace
 ├── crates/
-│   ├── journal/           # core library (JournalCore / ChapterSchema / EventLog / Projections)
-│   └── journal-mcp/       # stdio MCP server binary
+│   ├── journal/           # core library
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   └── event_log.rs   # ST1: EventLog SQLite primitive (append-only SoT)
+│   │   └── tests/
+│   │       └── event_log_test.rs  # ST1: 3 integration tests
+│   └── journal-mcp/       # stdio MCP server binary (pending ST4+)
 ├── docs/
 │   └── design.md          # design specification (this is the SoT)
 └── LICENSE-MIT / LICENSE-APACHE
