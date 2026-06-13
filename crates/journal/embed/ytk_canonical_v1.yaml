@@ -1,0 +1,84 @@
+schema_id: ytk-canonical
+version: 1
+description: ytk default canonical history schema
+
+states:
+  - id: open
+    initial: true
+  - id: appending
+  - id: closed
+    terminal: true
+
+transitions:
+  - from: open
+    to: appending
+    on: append_section
+  - from: appending
+    to: appending
+    on: append_section
+  - from: appending
+    to: appending
+    on: append_progress
+  - from: appending
+    to: closed
+    on: close_chapter
+    requires:
+      sections_present: [Verified, Done, Decided, "Not Done", "Issues touched"]
+      sections_non_empty: [Verified, Done, Decided]
+
+sections:
+  Verified:
+    required: true
+    append_policy: append-only-chain   # 訂正は previous_id chain
+    evidence_required: true             # 証跡 (file:line / URL / hash) 必須
+    description: 何を / どこで / どう検証したか + 結果
+
+  Done:
+    required: true
+    append_policy: append-only-chain
+    description: 実施した修正 / commit hash
+
+  Decided:
+    required: true
+    append_policy: append-only-chain
+    description: 設計判断 + Why=構造原因
+    hooks:
+      - on_append:
+          type: keyword_detect
+          patterns: ["次 session", "持ち越し", "次回", "next session"]
+          response: warn_carryover     # Q-6 持ち越し宣言 hint
+
+  "Not Done":
+    required: true
+    append_policy: append-only-chain
+    description: 持ち越し (AI 自走可能な残作業)
+
+  "Issues touched":
+    required: true
+    append_policy: append-only-chain
+    description: 関連 issue ID
+
+  # option sections
+  "Cleanup pending":
+    required: false
+    description: 不可逆 / 課金 / Human 判断領分の後始末
+
+  "Rejected paths":
+    required: false
+    description: 試したが棄却した技術 path の証跡
+
+  "Progress":
+    required: false
+    append_policy: append-only-log     # 時系列 step log、 chain なし
+    description: 中断あり長尺 task の step log
+
+  "Notes":
+    required: false
+    description: 技術 tip / 再発防止知見
+
+render:
+  file_projection:
+    chapter_header: "## {date} — {name}"
+    section_header: "### {section_name}"
+    section_order: [Verified, Done, Decided, "Not Done", "Issues touched",
+                    "Cleanup pending", "Rejected paths", Progress, Notes]
