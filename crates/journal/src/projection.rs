@@ -65,10 +65,6 @@ pub(crate) mod private {
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectionError {
     /// An IO error, returned by file-based projections (ST5+).
-    // ST4: this variant is defined for future ST5 use; no code path
-    // reaches it yet.  The allow attribute is removed once ST5 wires
-    // actual file IO.
-    #[allow(dead_code)]
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
