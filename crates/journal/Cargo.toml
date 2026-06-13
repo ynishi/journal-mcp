@@ -1,0 +1,20 @@
+[package]
+name        = "journal"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+authors     = { workspace = true }
+rust-version = { workspace = true }
+description = "Project canonical history primitive: chapter state machine + multi-schema EventLog + append-only projections."
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow     = { workspace = true }
+thiserror  = { workspace = true }
+rusqlite   = { workspace = true }
+ulid       = { workspace = true }
+rust-embed = { workspace = true }
+tracing    = { workspace = true }
