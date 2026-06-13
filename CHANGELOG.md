@@ -83,3 +83,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `crates/journal/src/lib.rs`: added `pub mod schema` / `pub mod registry` declarations and
   explicit re-exports (`ChapterSchema`, `SchemaError`, `SectionSpec`, `AppendPolicy`,
   `StateSpec`, `TransitionSpec`, `SchemaRegistry`, `RegistryError`)
+- `crates/journal/src/core.rs`: `JournalCore` — schema-driven state transition engine
+  implementing design.md §7
+  - `JournalCore::open(path, registry)` — opens (or creates) the `.journal.db` at `path`
+    and binds a `SchemaRegistry`; delegates all persistent writes to `EventLog`
+  - `JournalCore::open_chapter(name, schema_id)` — resolves the schema, derives the initial
+    state via `ChapterSchema::initial_state`, and delegates `EventLog::append_chapter_open`;
+    returns a `ChapterId`
+  - `JournalCore::append_section(id, name, body)` — replays chapter state from `EventLog`,
+    validates the `AppendPolicy` (rejects `AppendOnce` sections that already have content),
+    runs `schema.run_hooks` to emit `HookWarning` values, and delegates
+    `EventLog::append_section`; returns `Vec<HookWarning>`
+  - `JournalCore::close_chapter(id)` — validates all `sections_present` and
+    `sections_non_empty` close requirements against the event replay, then delegates
+    `EventLog::append_close`
+  - `JournalError` via `thiserror::Error` with `Schema` / `EventLog` / `Registry` /
+    `SchemaNotFound` / `UnknownState` / `NoTransition` / `UnknownSection` /
+    `AppendOncePolicy` / `RequiresSectionsPresent` / `RequiresSectionsNonEmpty` variants;
+    all `Err` arms emit `tracing::warn!`
+  - Crux invariants enforced: (1) every persistent write path calls `self.log.append_*` with
+    no other storage path; (2) `JournalCore` holds only `log: EventLog` and
+    `registry: SchemaRegistry`, never a raw `rusqlite::Connection`
+- `crates/journal/src/handle.rs`: `ChapterHandle<S: ChapterState>` — compile-time typestate
+  guard for chapter state transitions (design.md §7.1, BP-6.1 sealed trait + BP-6.2
+  PhantomData typestate)
+  - `ChapterState` sealed trait (`pub(crate)`) via `mod private { pub trait Sealed {} }`;
+    external code cannot implement new state types
+  - Zero-sized marker structs `Open`, `Appending`, `Closed` — each implements `ChapterState`
+    and `private::Sealed`
+  - `ChapterHandle<S>` holds `id: ChapterId`, `schema: Arc<ChapterSchema>`, and
+    `PhantomData<S>`; all fields `pub(crate)`
+  - `impl ChapterHandle<Open>`: `new`, `start_appending → ChapterHandle<Appending>`
+  - `impl ChapterHandle<Appending>`: `close → ChapterHandle<Closed>`
+  - `impl ChapterHandle<Closed>`: `id()` only — `append_section` and `close` are
+    **intentionally absent**, so any attempt to call them on a `Closed` handle is a
+    **compile error** (verified by `compile_fail` doc test in the module)
+- `crates/journal/src/schema.rs`: runtime schema query helpers added (design.md §7 pseudo-code)
+  - `ChapterSchema::transition(current, event)` — iterates `transitions` to find the entry
+    where `from == current && on == event`; returns `SchemaError::UnknownState` when `current`
+    does not match any `from`, `SchemaError::NoTransition` when no entry matches `event`
+  - `ChapterSchema::section(name)` — looks up `sections.get(name)`;
+    returns `SchemaError::SectionNotFound` when absent
+  - `ChapterSchema::run_hooks(section_name, body)` — iterates `SectionSpec.hooks` for the
+    named section, executes `HookAction::KeywordDetect` by checking each pattern as a
+    case-insensitive substring, and collects `HookWarning` values for every match
+  - `SectionSpec.hooks: Vec<HookSpec>` — new field with `#[serde(default)]`; existing YAML
+    files without a `hooks:` key deserialise to an empty Vec (backwards-compatible)
+  - New types: `HookSpec { on_append: HookAction }`,
+    `HookAction::KeywordDetect { patterns: Vec<String>, response: String }`,
+    `HookWarning { kind: String, hint: String }` (public, re-exported from `lib.rs`)
+  - `SchemaError` new variants: `UnknownState` / `NoTransition` / `SectionNotFound`
+    (runtime-only; do not affect existing `parse_str` paths)
+- `crates/journal/src/lib.rs`: added `pub mod core` / `pub mod handle` declarations and
+  re-exports (`JournalCore`, `JournalError`, `HookSpec`, `HookAction`, `HookWarning`)
+- `crates/journal/tests/journal_core_test.rs`: 4 integration tests for ST3
+  - `test_state_transition_happy_path` (T1) — `open_chapter` → `append_section` × 5 required
+    sections → `close_chapter`; verifies replay event count and that a second `close_chapter`
+    returns `JournalError::NoTransition`
+  - `test_append_once_policy` (T2) — second `append_section` on an `append-once` section
+    returns `JournalError::AppendOncePolicy`
+  - `test_close_requires_check` (T3) — `close_chapter` without required sections returns
+    `JournalError::RequiresSectionsPresent` / `RequiresSectionsNonEmpty`
+  - `test_hook_keyword_detect` (T4) — appending body containing a keyword from
+    `ytk_canonical_v1.yaml` `Decided` section hooks produces a non-empty `Vec<HookWarning>`
