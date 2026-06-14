@@ -9,6 +9,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `crates/journal-mcp/src/main.rs`: `JournalMcpServer` struct + stdio MCP server implementing
+  design.md §10 Step 5 — exposes all 15 `journal_*` tools via `#[tool_router]` macro (ST6)
+  - `JournalMcpServer` — `Clone`-able server struct wrapping `Arc<Mutex<JournalCore>>`; all 15
+    tools registered in a single `#[tool_router] impl JournalMcpServer` block (Crux #1)
+  - `JournalMcpServer::new(project_root)` — initialises `SchemaRegistry::with_project_local`,
+    opens `{project_root}/workspace/.journal.db`, and optionally attaches `FileProjection` to
+    `{project_root}/workspace/journal.md` (skipped when `JOURNAL_DISABLE_FILE_PROJECTION=1`)
+  - `#[tool_handler] impl ServerHandler for JournalMcpServer` with `get_info()` returning
+    `ServerInfo { name: "journal-mcp", version: env!("CARGO_PKG_VERSION") }`
+  - `main()` — resolves `JOURNAL_PROJECT_ROOT` env (falls back to `current_dir()`), constructs
+    `JournalMcpServer`, and calls `server.serve(stdio()).await?.waiting().await?` (Crux #3: stdio
+    transport fixed; TCP/HTTP alternatives are prohibited)
+  - **Chapter lifecycle tools** (writer, `idempotent_hint: false`):
+    - `journal_open_chapter(name, schema_id)` → chapter ID string
+    - `journal_append_section(chapter_id, section_name, body)` → JSON array of `HookWarning`
+    - `journal_append_progress(chapter_id, line)` → JSON array of `HookWarning` (thin wrapper
+      over `append_section` targeting the `"Progress"` section)
+    - `journal_close_chapter(chapter_id)` → `"ok"`
+  - **Schema tools** — 3 independent MCP tool entries (Crux #2):
+    - `journal_schema_load(yaml)` — loads a YAML literal into the runtime L2 registry via
+      `JournalCore::load_schema_yaml`; returns the registry key (writer, `idempotent_hint: true`)
+    - `journal_schema_list()` — returns all registered schema IDs as a JSON array (read-only)
+    - `journal_schema_show(key)` — returns the full YAML for a given registry key (read-only)
+  - **Read tools** (read-only, `idempotent_hint: true`):
+    - `journal_tail(n?)` — returns the last `n` chapters (default 10) as JSON
+    - `journal_grep(pattern, since?, until?)` — full-text substring search across all section
+      bodies; optional `since`/`until` Unix epoch ms filters
+    - `journal_chapter_list()` — returns all chapters in Microsoft Decision Log table format
+      (`chapter_id`, `schema_id`, `current_state`, `opened_at`, `closed_at`, `decided_summary`,
+      `link`)
+    - `journal_open_chapters()` — returns chapter IDs of all currently open chapters
+    - `journal_progress_of(chapter_id)` — returns all Progress-section events for a chapter
+  - **Projection tools**:
+    - `journal_projection_attach(name)` — attaches a named projection; first cut only supports
+      `"file"` (writer, `idempotent_hint: true`)
+    - `journal_projection_detach(name)` — detaches a named projection (returns
+      `JournalError::Unsupported` in first cut; tool entry registered per Crux #1)
+    - `journal_projection_rebuild(name)` — replays all chapters through the named projection
+      (writer, `idempotent_hint: true`)
+  - Parameter structs per tool: each `#[derive(Debug, Deserialize, JsonSchema)]` struct has doc
+    comments that become the MCP wire `description` fields via schemars (BP-3 pattern)
+- `crates/journal-mcp/Cargo.toml`: added `rmcp = "0.2"`, `schemars = { workspace = true }`,
+  `serde_json = { workspace = true }`, `anyhow = { workspace = true }`,
+  `tokio = { workspace = true }`, `tracing-subscriber = { workspace = true }` dependencies
+- `Cargo.toml` (workspace): added `rmcp`, `schemars`, `serde_json`, `tracing-subscriber` to
+  `[workspace.dependencies]`
+- `crates/journal/src/core.rs`: 8 new public methods extending `JournalCore` (ST6 Core API)
+  - `append_progress(&mut self, id: &ChapterId, line: &str) -> Result<Vec<HookWarning>, JournalError>`
+    — thin wrapper delegating to `append_section(id, "Progress", line)`
+  - `tail_chapters(&mut self, n: usize) -> Result<Vec<ChapterReplay>, JournalError>` — returns
+    the last `n` chapters ordered by `opened_at DESC` via `EventLog::all_chapter_metas`
+  - `chapter_ids(&mut self, since: Option<i64>) -> Result<Vec<ChapterId>, JournalError>` — all
+    chapter IDs; optional `since` Unix epoch ms filter
+  - `open_chapter_ids(&mut self) -> Result<Vec<ChapterId>, JournalError>` — chapter IDs where
+    `closed_at IS NULL`
+  - `progress_of(&mut self, id: &ChapterId) -> Result<Vec<EventRow>, JournalError>` — filters
+    chapter event replay to `section_name == "Progress"` rows
+  - `grep_chapters(&mut self, pattern: &str, since: Option<i64>, until: Option<i64>) -> Result<Vec<ChapterReplay>, JournalError>`
+    — substring match on all section body fields; optional time range filter
+  - `list_projection_names(&self) -> Vec<&'static str>` — returns `name()` of every attached
+    projection
+  - `rebuild_projection(&mut self, name: &str) -> Result<(), JournalError>` — replays all
+    chapters through the named projection via `EventLog::all_chapter_metas` iteration
+  - `load_schema_yaml(&mut self, yaml: &str) -> Result<String, JournalError>` — facade over
+    `SchemaRegistry::load_from_yaml_str`; avoids exposing `&mut SchemaRegistry` from `JournalCore`
+- `crates/journal/src/event_log.rs`: `all_chapter_metas(n: Option<usize>) -> Result<Vec<ChapterMeta>, EventLogError>`
+  — SQL `SELECT * FROM chapter_meta ORDER BY opened_at DESC` with optional `LIMIT`; used by
+  `tail_chapters`, `chapter_ids`, `open_chapter_ids`, `grep_chapters`, `rebuild_projection`
+- `crates/journal/src/registry.rs`: `load_from_yaml_str(&mut self, yaml: &str) -> Result<String, RegistryError>`
+  — parses a YAML literal via `ChapterSchema::parse_str`, derives the registry key
+  (`{schema_id}-v{version}`), inserts into L2, and returns the key
+- `crates/journal/src/projection.rs`: `fn name(&self) -> &'static str` added as a required
+  method to the `JournalProjection` trait; enables named lookup in
+  `list_projection_names` / `rebuild_projection` / `projection_attach` / `projection_detach`
+- `crates/journal/src/projection/file.rs`: `FileProjection` full implementation (ST5)
+  - Content-hash dirty-skip: `rebuild_chapter` computes SHA-256 of the rendered output and
+    skips the file write if the existing file matches (avoids redundant I/O)
+  - Dirty-chapter marking: `mark_dirty` inserts the chapter ID into the `dirty` `HashSet`
+  - Atomic rename: writes to a temp file (`journal.md.tmp`) then renames to the target path
+    via `std::fs::rename` to prevent torn reads during rebuild
+  - Debounce guard: optional minimum interval between rebuilds via an internal `last_rebuilt`
+    timestamp (protects against hot-loop append storms)
+  - `pub fn name(&self) -> &'static str { "file" }` — satisfies the new `JournalProjection::name`
+    required method
+  - `crates/journal/src/schema.rs`: `accessor_field` helpers added to `ChapterSchema` — new
+    `section_names()` and `initial_state()` accessors consumed by `FileProjection` template render
+- `crates/journal/tests/projection_test.rs`: integration tests extended for ST5 and ST6
+  - Content-hash dirty-skip test (ST5): writes a chapter, rebuilds, asserts file written; then
+    rebuilds again with no changes and asserts the file mtime is unchanged
+  - Atomic rename regression test (ST5): verifies the temp file is absent after a successful
+    `rebuild_chapter`
+  - `journal_tool_router_count` (ST6 T1): constructs `JournalMcpServer` with
+    `JOURNAL_DISABLE_FILE_PROJECTION=1` and asserts `tool_router.list_all().len() == 15`
+
 - `crates/journal/src/projection.rs`: sealed `JournalProjection` trait implementing design.md §4
   - `pub(crate) mod private { pub trait Sealed {} }` — sealing mechanism; external crates cannot
     implement `JournalProjection` (the `private` module is not visible outside the `journal` crate)
