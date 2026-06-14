@@ -9,6 +9,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `crates/journal/src/event_log.rs`: fifth event type `import` added to EventLog schema (ST7)
+  - `EventLog::append_import(payload: serde_json::Value, tx: &Transaction)` — writes one
+    `import` event row inside an externally-supplied `rusqlite::Transaction`, enabling the caller
+    to batch-commit N chapters atomically
+  - Replay paths (`replay_chapter` / `replay_until`) extended to expand `import` events: the
+    `chapters[]` payload array is unrolled into virtual `chapter_open + section_append × N +
+    chapter_close` rows so existing projection / query paths consume imported chapters
+    transparently
+- `crates/journal/src/core.rs`: `JournalCore::import_chapter` new public method (ST7)
+  - `import_chapter(path: &Path) -> Result<Vec<ChapterId>, JournalError>` — reads a
+    `ytk-canonical-v1` markdown file, parses H2-delimited chapters and H3-delimited sections,
+    opens a single `rusqlite::Transaction`, checks for chapter-ID collisions, writes one
+    `import` event with all N chapters in the payload, commits, and returns the imported
+    `Vec<ChapterId>`; mid-flight parse errors or collisions trigger full rollback
+  - `JournalError::ImportCollision { chapter_id: ChapterId, existing_epoch_ms: i64 }` variant
+    added — carries the colliding chapter ID and the timestamp of the pre-existing chapter so
+    callers can identify the conflict precisely
+- `crates/journal-mcp/src/main.rs`: `journal_import` registered as the 16th MCP tool (ST7)
+  - `JournalImportParams { path: String }` — parameter struct with schemars-derived JSON Schema
+  - `#[tool] async fn journal_import` handler — delegates to `JournalCore::import_chapter`,
+    serialises the returned `Vec<ChapterId>` as a JSON array; annotations:
+    `read_only_hint: false, destructive_hint: false, idempotent_hint: false,
+    open_world_hint: false` (calling twice with the same file produces a collision error)
+  - `test_st7_exactly_sixteen_tools` (renamed from `test_subtask3_exactly_fifteen_tools`) —
+    asserts `tool_router.list_all().len() == 16`
+  - `EXPECTED_TOOLS` const array extended with `"journal_import"` (element count 16)
+- `crates/journal-mcp/src/main.rs`: `JournalMcpServer::new_with_config` test-only constructor
+  (ST7-ST3)
+  - `pub(crate) fn new_with_config(project_root: PathBuf, attach_file_projection: bool) ->
+    anyhow::Result<Self>` — allows tests to construct the server with FileProjection detached;
+    gated behind `#[cfg(test)]` so the symbol is absent from production builds; eliminates the
+    need for `std::env::set_var("JOURNAL_DISABLE_FILE_PROJECTION", "1")` in test helpers
+
+### Changed
+
+- `crates/journal/src/projection/file.rs`: `FileProjection` redesigned to explicit-only render
+  (ST7-ST1)
+  - `last_written_hash: Option<u64>` field added to `FileProjection` — tracks the hash of the
+    last content written to disk; `None` on first construction
+  - `write_atomic` extended with a hash-check overwrite guard: before the atomic rename the
+    method reads the existing file (if any), computes its hash, and compares it against
+    `last_written_hash`; when they differ (indicating external edits since the last write) the
+    existing file is copied to `<path>.bak.<epoch_ms>` before overwriting, protecting
+    hand-edited projections
+  - `new` and `with_debounce` initialise `last_written_hash: None`
+- `crates/journal/src/core.rs`: `close_chapter` no longer dispatches `rebuild_chapter` (ST7-ST1)
+  — the `for p in &mut self.projections { p.rebuild_chapter(&final_replay)? }` loop removed;
+  `journal_projection_rebuild` (via `JournalCore::rebuild_projection`) is now the sole render
+  trigger; `mark_dirty` dispatch from `append_section` is unchanged, so dirty tracking remains
+  accurate
+- `crates/journal-mcp/src/main.rs`: `JOURNAL_DISABLE_FILE_PROJECTION` env-var path removed
+  (ST7-ST3)
+  - `JournalMcpServer::new` no longer branches on `JOURNAL_DISABLE_FILE_PROJECTION=1`; the env
+    var is no longer read or documented
+  - `make_server` test helper replaced with `JournalMcpServer::new_with_config(tmp.path(),
+    false)` — eliminates `unsafe { std::env::set_var(...) }` calls that were thread-unsafe
+    under Rust 1.81+
+
+### Added (documentation)
+
+- `docs/design.md` §8.1 updated: fifth event type `import` added to EventLog schema table;
+  canonical JSON payload form for `import` events documented (ST7-ST4)
+- `docs/design.md` §13 updated: migration tool entry changed from "non-goal" to "ST7 昇格 —
+  `journal_import` tool 本実装済"; Dogfood Reset SOP section added (ST7-ST4)
+
+---
+
+<!-- ST6 entries below -->
+
 - `crates/journal-mcp/src/main.rs`: `JournalMcpServer` struct + stdio MCP server implementing
   design.md §10 Step 5 — exposes all 15 `journal_*` tools via `#[tool_router]` macro (ST6)
   - `JournalMcpServer` — `Clone`-able server struct wrapping `Arc<Mutex<JournalCore>>`; all 15
