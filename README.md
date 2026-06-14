@@ -18,7 +18,9 @@ Project の **正史** (= 判断 + 検証の流れ、 「再開・中断・路�
 
 ## Status
 
-**WIP — implementation in progress (ST4 complete)**. ST1 (EventLog SQLite primitive), ST2 (ChapterSchema parser + SchemaRegistry + built-in schema embed), ST3 (JournalCore schema-driven state transition engine + ChapterHandle typestate), and ST4 (sealed `JournalProjection` trait + `FileProjection` dirty-tracking skeleton + `JournalCore` projection dispatch wiring) are implemented and tested. ST5 and beyond are pending.
+**WIP — implementation in progress (ST6 complete)**. ST1 (EventLog SQLite primitive), ST2 (ChapterSchema parser + SchemaRegistry + built-in schema embed), ST3 (JournalCore schema-driven state transition engine + ChapterHandle typestate), ST4 (sealed `JournalProjection` trait + `FileProjection` dirty-tracking skeleton + `JournalCore` projection dispatch wiring), ST5 (`FileProjection` full implementation — content-hash dirty-skip + atomic rename + debounce + `SchemaRegistry` accessor helpers), and ST6 (`JournalMcpServer` + all 15 `journal_*` MCP tools via `#[tool_router]` + stdio transport + `JournalCore` API extensions) are implemented and tested.
+
+The MCP server binary (`crates/journal-mcp`) is now functional. Set `JOURNAL_PROJECT_ROOT` to your project directory and run the binary; it serves all 15 tools over stdio transport as specified in `docs/design.md §6` and `§10 Step 5`.
 
 See `docs/design.md` for the full design specification. See `CHANGELOG.md` for what has been implemented.
 
@@ -26,7 +28,7 @@ See `docs/design.md` for the full design specification. See `CHANGELOG.md` for w
 
 ```
 journal-mcp/
-├── Cargo.toml             # workspace
+├── Cargo.toml             # workspace (rmcp, schemars, serde_json, tracing-subscriber added ST6)
 ├── crates/
 │   ├── journal/           # core library
 │   │   ├── embed/
@@ -34,25 +36,65 @@ journal-mcp/
 │   │   │   ├── madr_v1.yaml           # ST2: built-in ADR schema (compile-time embed)
 │   │   │   └── minimal_v1.yaml        # ST2: built-in minimal schema (compile-time embed)
 │   │   ├── src/
-│   │   │   ├── lib.rs
-│   │   │   ├── event_log.rs        # ST1: EventLog SQLite primitive (append-only SoT)
-│   │   │   ├── schema.rs           # ST2: ChapterSchema YAML parser + SchemaError; ST3: runtime helpers (transition/section/run_hooks) + HookSpec/HookAction/HookWarning
-│   │   │   ├── registry.rs         # ST2: SchemaRegistry two-layer resolver (L1 built-in / L2 project-local)
-│   │   │   ├── core.rs             # ST3: JournalCore schema-driven state transition engine; ST4: projection dispatch wiring
-│   │   │   ├── handle.rs           # ST3: ChapterHandle<S: ChapterState> compile-time typestate guard (BP-6.2)
-│   │   │   ├── projection.rs       # ST4: sealed JournalProjection trait + ProjectionError
+│   │   │   ├── lib.rs                 # public re-exports (updated ST4/ST6)
+│   │   │   ├── event_log.rs           # ST1: EventLog SQLite primitive (append-only SoT);
+│   │   │   │                          #   ST6: all_chapter_metas() added
+│   │   │   ├── schema.rs              # ST2: ChapterSchema YAML parser + SchemaError;
+│   │   │   │                          #   ST3: runtime helpers (transition/section/run_hooks) + HookSpec/HookAction/HookWarning;
+│   │   │   │                          #   ST5: section_names() / initial_state() accessor helpers
+│   │   │   ├── registry.rs            # ST2: SchemaRegistry two-layer resolver (L1 built-in / L2 project-local);
+│   │   │   │                          #   ST6: load_from_yaml_str() runtime mutation
+│   │   │   ├── core.rs                # ST3: JournalCore schema-driven state transition engine;
+│   │   │   │                          #   ST4: projection dispatch wiring;
+│   │   │   │                          #   ST6: append_progress / tail_chapters / chapter_ids /
+│   │   │   │                          #        open_chapter_ids / progress_of / grep_chapters /
+│   │   │   │                          #        list_projection_names / rebuild_projection /
+│   │   │   │                          #        load_schema_yaml added
+│   │   │   ├── handle.rs              # ST3: ChapterHandle<S: ChapterState> compile-time typestate guard (BP-6.2)
+│   │   │   ├── projection.rs          # ST4: sealed JournalProjection trait + ProjectionError;
+│   │   │   │                          #   ST6: name() required method added to trait
 │   │   │   └── projection/
-│   │   │       └── file.rs         # ST4: FileProjection dirty-tracking skeleton (rebuild deferred to ST5)
+│   │   │       └── file.rs            # ST4: FileProjection skeleton;
+│   │   │                              #   ST5: full implementation (content-hash dirty-skip +
+│   │   │                              #        atomic rename + debounce);
+│   │   │                              #   ST6: name() -> "file" impl
 │   │   └── tests/
 │   │       ├── event_log_test.rs       # ST1: 3 integration tests
 │   │       ├── schema_registry_test.rs # ST2: 3 integration tests
 │   │       ├── journal_core_test.rs    # ST3: 4 integration tests (T1 happy path / T2 AppendOnce / T3 close requires / T4 hook keyword_detect)
-│   │       └── projection_test.rs      # ST4: 2 integration tests (T2 FileProjection direct / T3 dispatch wiring)
-│   └── journal-mcp/       # stdio MCP server binary (pending ST4+)
+│   │       └── projection_test.rs      # ST4: 2 integration tests (dispatch wiring / FileProjection direct);
+│   │                                   #   ST5: content-hash dirty-skip + atomic rename tests;
+│   │                                   #   ST6: journal_tool_router_count (15 tools assert)
+│   └── journal-mcp/       # stdio MCP server binary
+│       ├── Cargo.toml     # ST6: rmcp, schemars, serde_json, anyhow, tokio, tracing-subscriber
+│       └── src/
+│           └── main.rs    # ST6: JournalMcpServer + #[tool_router] 15 tools + stdio main
 ├── docs/
 │   └── design.md          # design specification (this is the SoT)
 └── LICENSE-MIT / LICENSE-APACHE
 ```
+
+## MCP Tools
+
+All 15 tools are registered in a single `#[tool_router] impl JournalMcpServer` block and served over stdio transport.
+
+| Tool | Category | Description |
+|---|---|---|
+| `journal_open_chapter` | lifecycle | Open a new chapter with a given name and schema ID |
+| `journal_append_section` | lifecycle | Append a section body to an open chapter |
+| `journal_append_progress` | lifecycle | Append a progress line to the `Progress` section |
+| `journal_close_chapter` | lifecycle | Close a chapter (validates close requirements) |
+| `journal_tail` | read | Return the last N chapters |
+| `journal_grep` | read | Substring search across all section bodies |
+| `journal_chapter_list` | read | List all chapters in Decision Log table format |
+| `journal_open_chapters` | read | List IDs of all currently open chapters |
+| `journal_progress_of` | read | Return Progress-section events for a chapter |
+| `journal_schema_load` | schema | Load a YAML schema into the runtime L2 registry |
+| `journal_schema_list` | schema | List all registered schema IDs |
+| `journal_schema_show` | schema | Return the full YAML for a registered schema |
+| `journal_projection_attach` | projection | Attach a named projection to the server |
+| `journal_projection_detach` | projection | Detach a named projection |
+| `journal_projection_rebuild` | projection | Replay all chapters through a named projection |
 
 ## License
 

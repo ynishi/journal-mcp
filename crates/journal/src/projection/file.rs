@@ -129,6 +129,14 @@ impl FileProjection {
 impl private::Sealed for FileProjection {}
 
 impl JournalProjection for FileProjection {
+    /// Returns the stable identifier for this projection type.
+    ///
+    /// Used by [`JournalCore::rebuild_projection`] and
+    /// [`JournalCore::list_projection_names`] for named lookup.
+    fn name(&self) -> &'static str {
+        "file"
+    }
+
     /// Mark the chapter identified by `id` as dirty.
     ///
     /// Inserts the chapter's string id into the internal dirty set.
