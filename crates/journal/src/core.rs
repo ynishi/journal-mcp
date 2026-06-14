@@ -111,6 +111,26 @@ pub enum JournalError {
     /// returns this error.
     #[error("projection detach is not yet supported (see docs/design.md §10 Step 7)")]
     ProjectionDetachUnsupported,
+
+    /// A chapter_id collision was detected during import.
+    ///
+    /// The import transaction is rolled back atomically when this error is returned.
+    /// The `existing_epoch_ms` field holds the `opened_at` timestamp of the
+    /// already-existing chapter so callers can surface meaningful diagnostics.
+    #[error("import collision: chapter_id={chapter_id} already exists (existing epoch_ms={existing_epoch_ms})")]
+    ImportCollision {
+        /// The chapter identifier that already exists in `chapter_meta`.
+        chapter_id: ChapterId,
+        /// The `opened_at` timestamp of the existing chapter (Unix epoch ms).
+        existing_epoch_ms: i64,
+    },
+
+    /// The specified path does not point to a readable file.
+    #[error("import path not found or not readable: {path}")]
+    ImportPathNotFound {
+        /// The filesystem path that could not be read.
+        path: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -462,31 +482,6 @@ impl JournalCore {
             e
         })?;
 
-        // Re-fetch the full replay after close so projections receive the
-        // complete chapter including the close event.
-        let final_replay = self.log.chapter(id).map_err(|e| {
-            tracing::warn!(
-                target: "journal::core",
-                error = ?e,
-                chapter_id = %id,
-                "close_chapter: projection replay fetch failed"
-            );
-            e
-        })?;
-
-        // Dispatch to registered projections.
-        for p in &mut self.projections {
-            p.rebuild_chapter(&final_replay).map_err(|e| {
-                tracing::warn!(
-                    target: "journal::core",
-                    error = ?e,
-                    chapter_id = %id,
-                    "close_chapter: projection.rebuild_chapter failed"
-                );
-                e
-            })?;
-        }
-
         Ok(())
     }
 
@@ -782,6 +777,248 @@ impl JournalCore {
     }
 
     // -----------------------------------------------------------------------
+    // Import (ST7 §import_chapter)
+    // -----------------------------------------------------------------------
+
+    /// Parse a markdown file at `path` and import all chapters it contains.
+    ///
+    /// Follows the **ytk-canonical-v1** line-based parsing rule:
+    /// - `## <heading>` starts a new chapter (chapter_id derived from heading text).
+    /// - `### <heading>` starts a new section within the current chapter.
+    /// - Content lines between headings are accumulated as section body text.
+    /// - Any other heading level (`#`, `####`, ...) is skipped with a
+    ///   `tracing::warn!` (silent skip is forbidden per subtask-2.md Risks §2).
+    ///
+    /// All chapter inserts are performed in **one atomic SQLite transaction**
+    /// (via [`EventLog::transaction`] + [`EventLog::append_import`]).  If any
+    /// `chapter_id` collision is detected before the transaction is committed,
+    /// the transaction is rolled back and a [`JournalError::ImportCollision`] is
+    /// returned — no partial state is written.
+    ///
+    /// Projection rebuild is **not** dispatched after the import (Crux #1:
+    /// explicit-only render policy).  The caller must invoke
+    /// [`JournalCore::rebuild_projection`] explicitly if rendering is desired.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` — filesystem path to the markdown file to import.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<ChapterId>` of the chapter IDs that were imported, in parse order.
+    ///
+    /// # Errors
+    ///
+    /// * [`JournalError::ImportPathNotFound`] — the file cannot be read.
+    /// * [`JournalError::ImportCollision`] — a chapter_id already exists; the
+    ///   entire batch is rolled back.
+    /// * [`JournalError::EventLog`] — underlying SQLite failure.
+    pub fn import_chapter(&mut self, path: &Path) -> Result<Vec<ChapterId>, JournalError> {
+        // Read the source file.
+        let content = std::fs::read_to_string(path).map_err(|_| {
+            tracing::warn!(
+                target: "journal::core",
+                path = ?path,
+                "import_chapter: failed to read file"
+            );
+            JournalError::ImportPathNotFound {
+                path: path.display().to_string(),
+            }
+        })?;
+
+        // ── ytk-canonical-v1 line-based parser ──────────────────────────────
+        // State: current chapter accumulator and section accumulator.
+        struct SectionAcc {
+            name: String,
+            lines: Vec<String>,
+        }
+        struct ChapterAcc {
+            heading: String,
+            sections: Vec<SectionAcc>,
+            current_section: Option<SectionAcc>,
+        }
+
+        let mut chapters: Vec<ChapterAcc> = Vec::new();
+        let mut current_chapter: Option<ChapterAcc> = None;
+
+        for line in content.lines() {
+            if let Some(h2) = line.strip_prefix("## ") {
+                // Flush any in-progress section into the current chapter.
+                if let Some(ref mut ch) = current_chapter {
+                    if let Some(sec) = ch.current_section.take() {
+                        ch.sections.push(sec);
+                    }
+                }
+                // Push the completed chapter.
+                if let Some(ch) = current_chapter.take() {
+                    chapters.push(ch);
+                }
+                current_chapter = Some(ChapterAcc {
+                    heading: h2.trim().to_owned(),
+                    sections: Vec::new(),
+                    current_section: None,
+                });
+            } else if let Some(h3) = line.strip_prefix("### ") {
+                if let Some(ref mut ch) = current_chapter {
+                    // Flush the previous section.
+                    if let Some(sec) = ch.current_section.take() {
+                        ch.sections.push(sec);
+                    }
+                    ch.current_section = Some(SectionAcc {
+                        name: h3.trim().to_owned(),
+                        lines: Vec::new(),
+                    });
+                } else {
+                    tracing::warn!(
+                        target: "journal::core",
+                        "import_chapter: h3 '{}' found before any h2 chapter heading — skipping",
+                        h3.trim()
+                    );
+                }
+            } else if line.starts_with("# ")
+                || line.starts_with("#### ")
+                || line.starts_with("##### ")
+            {
+                // Unknown heading level — warn and skip (silent skip forbidden).
+                tracing::warn!(
+                    target: "journal::core",
+                    "import_chapter: unknown heading level encountered, skipping line: {:?}",
+                    line
+                );
+            } else if let Some(ref mut ch) = current_chapter {
+                // Accumulate body content into the current section.
+                if let Some(ref mut sec) = ch.current_section {
+                    sec.lines.push(line.to_owned());
+                }
+                // Lines between h2 and the first h3 are silently dropped
+                // (no section context yet).
+            }
+        }
+        // Flush the last chapter/section.
+        if let Some(ref mut ch) = current_chapter {
+            if let Some(sec) = ch.current_section.take() {
+                ch.sections.push(sec);
+            }
+        }
+        if let Some(ch) = current_chapter.take() {
+            chapters.push(ch);
+        }
+
+        if chapters.is_empty() {
+            // Nothing to import — return empty successfully.
+            return Ok(vec![]);
+        }
+
+        // ── Build chapter_id list and check for collisions ──────────────────
+        // chapter_id is derived from the h2 heading text (slugified).
+        fn to_chapter_id(heading: &str) -> String {
+            heading
+                .to_lowercase()
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '-' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>()
+                .split('-')
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("-")
+        }
+
+        // Collision check BEFORE opening the transaction (fast path).
+        for ch in &chapters {
+            let cid = ChapterId(to_chapter_id(&ch.heading));
+            if self.log.chapter_exists(&cid)? {
+                // Fetch the existing opened_at for a helpful error message.
+                let existing_meta = self
+                    .log
+                    .all_chapter_metas()?
+                    .into_iter()
+                    .find(|m| m.chapter_id == cid);
+                let existing_epoch_ms = existing_meta.map(|m| m.opened_at).unwrap_or(0);
+                tracing::warn!(
+                    target: "journal::core",
+                    chapter_id = %cid,
+                    existing_epoch_ms,
+                    "import_chapter: collision detected — rolling back"
+                );
+                return Err(JournalError::ImportCollision {
+                    chapter_id: cid,
+                    existing_epoch_ms,
+                });
+            }
+        }
+
+        // ── Compute source_hash ──────────────────────────────────────────────
+        let source_hash = crate::event_log::EventLog::hash_content(&content);
+        let migration_epoch_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let migration_id = ulid::Ulid::new().to_string();
+
+        // ── Build the import payload ─────────────────────────────────────────
+        let chapters_json: Vec<serde_json::Value> = chapters
+            .iter()
+            .map(|ch| {
+                let cid = to_chapter_id(&ch.heading);
+                let sections_json: Vec<serde_json::Value> = ch
+                    .sections
+                    .iter()
+                    .map(|sec| {
+                        serde_json::json!({
+                            "section_name": sec.name,
+                            "body": sec.lines.join("\n"),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "chapter_id": cid,
+                    "chapter_name": ch.heading,
+                    "schema_id": "ytk-canonical-v1",
+                    "sections": sections_json,
+                })
+            })
+            .collect();
+
+        let payload = serde_json::json!({
+            "source_path": path.display().to_string(),
+            "source_hash": source_hash,
+            "migration_epoch_ms": migration_epoch_ms,
+            "chapters": chapters_json,
+        });
+
+        // ── Atomic transaction ───────────────────────────────────────────────
+        {
+            let tx = self.log.transaction()?;
+            crate::event_log::EventLog::append_import(&migration_id, &payload, &tx)
+                .map_err(JournalError::EventLog)?;
+            tx.commit().map_err(|e| {
+                tracing::warn!(
+                    target: "journal::core",
+                    error = ?e,
+                    migration_id,
+                    "import_chapter: transaction commit failed"
+                );
+                JournalError::EventLog(crate::event_log::EventLogError::Sqlite(e))
+            })?;
+        }
+
+        // Return the list of imported chapter IDs (in parse order).
+        let imported: Vec<ChapterId> = chapters_json
+            .iter()
+            .filter_map(|c| c.get("chapter_id").and_then(|v| v.as_str()))
+            .map(|s| ChapterId(s.to_owned()))
+            .collect();
+
+        Ok(imported)
+    }
+
+    // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 
@@ -915,14 +1152,14 @@ mod tests {
         (core, dir)
     }
 
-    /// T3 — dispatch wiring: projection callbacks are fired for append_section
-    /// and close_chapter.
+    /// T3 — dispatch wiring: `mark_dirty` is called for each `append_section`;
+    /// `close_chapter` does NOT trigger `rebuild_chapter` (ST7 explicit-only render).
     ///
     /// Verifies:
     /// - `mark_dirty` is called once per `append_section` call.
-    /// - `rebuild_chapter` is called once per `close_chapter` call.
+    /// - `rebuild_chapter` is NOT called by `close_chapter` (Crux #1).
     #[test]
-    fn test_dispatch_wiring() {
+    fn test_close_chapter_does_not_trigger_rebuild() {
         let (mut core, _dir) = make_core_for_test();
 
         let mark_count = Arc::new(AtomicUsize::new(0));
@@ -958,11 +1195,57 @@ mod tests {
         core.close_chapter(&id)
             .expect("close_chapter should succeed");
 
-        // close_chapter should trigger rebuild_chapter exactly once.
+        // ST7: close_chapter must NOT trigger rebuild_chapter (explicit-only render policy).
+        assert_eq!(
+            rebuild_count.load(Ordering::SeqCst),
+            0,
+            "rebuild_chapter must NOT be called by close_chapter (ST7 explicit-only render)"
+        );
+    }
+
+    /// T3b — `rebuild_projection` (explicit call) triggers `rebuild_chapter` on closed chapters.
+    ///
+    /// Verifies that the only path to render is via `rebuild_projection`, consistent
+    /// with Crux #1 (explicit-only render policy).
+    #[test]
+    fn test_explicit_rebuild_projection_dispatches_rebuild_chapter() {
+        let (mut core, _dir) = make_core_for_test();
+
+        let mark_count = Arc::new(AtomicUsize::new(0));
+        let rebuild_count = Arc::new(AtomicUsize::new(0));
+
+        core.add_projection(TestProjection {
+            mark_count: Arc::clone(&mark_count),
+            rebuild_count: Arc::clone(&rebuild_count),
+        });
+
+        // Open, fill required sections, and close a chapter.
+        let id = core
+            .open_chapter("2026-06-14-explicit", "ytk-canonical-v1")
+            .expect("open_chapter should succeed");
+        let sections = ["Verified", "Done", "Decided", "Not Done", "Issues touched"];
+        for &s in &sections {
+            core.append_section(&id, s, "content")
+                .expect("append_section should succeed");
+        }
+        core.close_chapter(&id)
+            .expect("close_chapter should succeed");
+
+        // After close, rebuild_chapter must still be 0 (no auto-dispatch).
+        assert_eq!(
+            rebuild_count.load(Ordering::SeqCst),
+            0,
+            "rebuild_chapter must not be called by close_chapter"
+        );
+
+        // Explicit rebuild_projection must dispatch rebuild_chapter exactly once.
+        core.rebuild_projection("test")
+            .expect("rebuild_projection should succeed");
+
         assert_eq!(
             rebuild_count.load(Ordering::SeqCst),
             1,
-            "rebuild_chapter should be called once after close_chapter"
+            "rebuild_projection should call rebuild_chapter exactly once for the closed chapter"
         );
     }
 
@@ -1104,6 +1387,192 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // ST7 import tests — all use TempDir (Crux #3)
+    // -----------------------------------------------------------------------
+
+    /// Write `content` to `{dir}/{name}` and return the path.
+    fn write_tmp_md(dir: &tempfile::TempDir, name: &str, content: &str) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, content).expect("write_tmp_md: write should succeed");
+        path
+    }
+
+    /// T1 (property) — import_chapter: atomic batch inserts chapters from markdown.
+    ///
+    /// Verifies AC#1, AC#3, AC#7: chapters parsed from h2/h3, stored in chapter_meta,
+    /// and readable via chapter_ids().
+    #[test]
+    fn test_journal_import_atomic_batch() {
+        let (mut core, dir) = make_core_for_test();
+        let md = "\
+## 2026-06-10
+
+### Verified
+cargo test passes
+
+### Done
+commit abc123
+";
+        let path = write_tmp_md(&dir, "import_test.md", md);
+        let imported = core
+            .import_chapter(&path)
+            .expect("import_chapter should succeed");
+
+        assert_eq!(imported.len(), 1, "should have imported 1 chapter");
+        assert_eq!(imported[0].0, "2026-06-10");
+
+        // Verify the chapter appears in chapter_ids().
+        let all_ids = core.chapter_ids(None).expect("chapter_ids should succeed");
+        assert!(
+            all_ids.iter().any(|id| id.0 == "2026-06-10"),
+            "imported chapter should appear in chapter_ids(); got: {all_ids:?}"
+        );
+
+        // Verify chapter replay returns synthetic events (import replay expansion).
+        let replay = core
+            .log
+            .chapter(&imported[0])
+            .expect("chapter() should succeed for imported chapter");
+        // Should have at least open + section_append * 2 + close = 4 rows.
+        assert!(
+            replay.events.len() >= 3,
+            "replay should contain synthetic events; got: {}",
+            replay.events.len()
+        );
+    }
+
+    /// T2 (boundary) — import_chapter: collision on existing chapter_id rolls back entire batch.
+    ///
+    /// Verifies AC#5, AC#6: if any chapter_id already exists, the whole import is rejected.
+    #[test]
+    fn test_journal_import_collision_rollback() {
+        let (mut core, dir) = make_core_for_test();
+
+        // Pre-create a chapter that will collide.
+        open_and_fill(&mut core, "2026-06-10", true);
+
+        let md = "\
+## 2026-06-10
+
+### Verified
+should collide
+
+## 2026-06-11
+
+### Done
+new chapter
+";
+        let path = write_tmp_md(&dir, "collision_test.md", md);
+        let result = core.import_chapter(&path);
+
+        assert!(result.is_err(), "collision should return Err");
+        match result.unwrap_err() {
+            JournalError::ImportCollision { chapter_id, .. } => {
+                assert_eq!(
+                    chapter_id.0, "2026-06-10",
+                    "collision error should name the colliding chapter"
+                );
+            }
+            other => panic!("expected ImportCollision, got: {other:?}"),
+        }
+
+        // The non-colliding chapter (2026-06-11) must NOT have been inserted (rollback).
+        let all_ids = core.chapter_ids(None).expect("chapter_ids should succeed");
+        assert!(
+            !all_ids.iter().any(|id| id.0 == "2026-06-11"),
+            "2026-06-11 must not be present after collision rollback; got: {all_ids:?}"
+        );
+    }
+
+    /// T3 (property) — import_chapter: projection rebuild is NOT dispatched after import.
+    ///
+    /// Verifies AC#2 / Crux #1: explicit-only render policy — import does not call
+    /// rebuild_chapter on any registered projection.
+    #[test]
+    fn test_journal_import_no_auto_projection_rebuild() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let (mut core, dir) = make_core_for_test();
+
+        let rebuild_count = Arc::new(AtomicUsize::new(0));
+        core.add_projection(TestProjection {
+            mark_count: Arc::new(AtomicUsize::new(0)),
+            rebuild_count: Arc::clone(&rebuild_count),
+        });
+
+        let md = "\
+## 2026-06-12
+
+### Verified
+no auto rebuild
+";
+        let path = write_tmp_md(&dir, "no_rebuild_test.md", md);
+        core.import_chapter(&path)
+            .expect("import_chapter should succeed");
+
+        assert_eq!(
+            rebuild_count.load(Ordering::SeqCst),
+            0,
+            "rebuild_chapter must NOT be called by import_chapter (Crux #1 explicit-only render)"
+        );
+    }
+
+    /// T3b (boundary) — import_chapter: unknown heading levels are warned, not silently dropped.
+    ///
+    /// Verifies AC#13 (Risks §2): h1/h4+ headings produce tracing::warn! and are skipped.
+    /// The chapter containing them is still imported (only the headings are skipped).
+    #[test]
+    fn test_journal_import_warns_on_unknown_block() {
+        let (mut core, dir) = make_core_for_test();
+
+        let md = "\
+# Top-level heading (should warn and be skipped)
+
+## 2026-06-13
+
+### Verified
+valid section
+
+#### h4 heading (should warn and be skipped)
+
+### Done
+also valid
+";
+        let path = write_tmp_md(&dir, "unknown_block_test.md", md);
+        // Import should succeed even though h1/h4 are present.
+        let imported = core
+            .import_chapter(&path)
+            .expect("import_chapter should succeed despite h1/h4");
+
+        // The chapter itself must still be imported.
+        assert_eq!(imported.len(), 1, "should have imported 1 chapter");
+        assert_eq!(imported[0].0, "2026-06-13");
+
+        // Sections Verified and Done should be present in the replay.
+        let replay = core
+            .log
+            .chapter(&imported[0])
+            .expect("chapter() should succeed");
+        let section_names: Vec<&str> = replay
+            .events
+            .iter()
+            .filter(|e| e.event_type == "section_append")
+            .filter_map(|e| e.section_name.as_deref())
+            .collect();
+        assert!(
+            section_names.contains(&"Verified"),
+            "Verified section should be in replay; got: {section_names:?}"
+        );
+        assert!(
+            section_names.contains(&"Done"),
+            "Done section should be in replay; got: {section_names:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // T8 (ST6): list_projection_names and rebuild_projection
     // -----------------------------------------------------------------------
 
@@ -1132,9 +1601,9 @@ mod tests {
         );
 
         // Open and close a chapter so rebuild_projection has something to process.
+        // ST7: close_chapter does NOT dispatch rebuild_chapter, so baseline == 0.
         open_and_fill(&mut core, "2026-06-14-rebuild", true);
 
-        // Reset rebuild counter from close_chapter dispatch.
         let baseline = rebuild_count.load(Ordering::SeqCst);
 
         core.rebuild_projection(names[0])

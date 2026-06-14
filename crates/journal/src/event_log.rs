@@ -4,6 +4,8 @@
 //! The `event_log` table is immutable at the database level via BEFORE UPDATE/BEFORE DELETE
 //! triggers. `chapter_meta` has no triggers so state-transition UPDATEs succeed.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -388,6 +390,13 @@ impl EventLog {
     /// Returns a [`ChapterReplay`] containing the chapter metadata and all events
     /// ordered by `event_id` (ULID lexicographic order equals time order).
     ///
+    /// For chapters that were ingested via `import_chapter`, the `event_log` table
+    /// stores a single `import` event keyed by `migration_id` rather than
+    /// `chapter_id`.  This method detects that case (zero direct events for the
+    /// `chapter_id` stream) and expands the relevant import event into virtual
+    /// synthetic `open` / `section_append` / `close` rows so that callers see a
+    /// uniform `ChapterReplay` regardless of how the chapter was created.
+    ///
     /// # Errors
     ///
     /// Returns [`EventLogError::ChapterNotFound`] if no `chapter_meta` row exists for
@@ -457,7 +466,126 @@ impl EventLog {
                 e
             })?;
 
+        // Import replay expansion: if no direct events exist for this chapter_id
+        // stream, the chapter may have been inserted via import_chapter.
+        // Search for an import event whose payload.chapters array contains this
+        // chapter_id and expand it into synthetic open/section_append/close rows.
+        if events.is_empty() {
+            if let Ok(expanded) = self.expand_import_events(chapter_id, &meta) {
+                if !expanded.is_empty() {
+                    return Ok(ChapterReplay {
+                        meta,
+                        events: expanded,
+                    });
+                }
+            }
+        }
+
         Ok(ChapterReplay { meta, events })
+    }
+
+    /// Search `event_log` for an `import` event whose payload contains
+    /// `chapter_id` and synthesise virtual `open` / `section_append` / `close`
+    /// `EventRow`s for replay consumers.
+    ///
+    /// Returns an empty `Vec` if no matching import event is found.
+    fn expand_import_events(
+        &self,
+        chapter_id: &ChapterId,
+        meta: &ChapterMeta,
+    ) -> Result<Vec<EventRow>, EventLogError> {
+        // Fetch all import event rows from event_log.
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT event_id, payload, created_at
+               FROM event_log
+              WHERE event_type = 'import'
+              ORDER BY event_id",
+            )
+            .map_err(|e| {
+                tracing::warn!(error = ?e, "expand_import_events: prepare failed");
+                EventLogError::Sqlite(e)
+            })?;
+
+        let rows: Vec<(String, String, i64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(EventLogError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(EventLogError::Sqlite)?;
+
+        for (import_event_id, payload_str, created_at) in rows {
+            let payload: serde_json::Value =
+                serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null);
+
+            let empty = vec![];
+            let chapters = payload
+                .get("chapters")
+                .and_then(|c| c.as_array())
+                .unwrap_or(&empty);
+
+            for chapter_entry in chapters {
+                let cid = chapter_entry
+                    .get("chapter_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if cid != chapter_id.0 {
+                    continue;
+                }
+
+                // Found the chapter in this import event — synthesise EventRows.
+                let mut synthetic: Vec<EventRow> = Vec::new();
+                let open_id = format!("{import_event_id}_open");
+                let initial_state = serde_json::json!({ "initial_state": meta.current_state });
+                synthetic.push(EventRow {
+                    event_id: EventId(open_id.clone()),
+                    event_type: "open".to_owned(),
+                    section_name: None,
+                    payload: initial_state.to_string(),
+                    previous_id: None,
+                    created_at,
+                });
+
+                let sections_empty = vec![];
+                let sections = chapter_entry
+                    .get("sections")
+                    .and_then(|s| s.as_array())
+                    .unwrap_or(&sections_empty);
+                let mut prev_id = open_id;
+                for section in sections {
+                    let sname = section
+                        .get("section_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let sbody = section.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                    let sec_id = format!("{import_event_id}_{sname}");
+                    let sec_payload = serde_json::json!({ "body": sbody });
+                    synthetic.push(EventRow {
+                        event_id: EventId(sec_id.clone()),
+                        event_type: "section_append".to_owned(),
+                        section_name: Some(sname.to_owned()),
+                        payload: sec_payload.to_string(),
+                        previous_id: Some(EventId(prev_id.clone())),
+                        created_at,
+                    });
+                    prev_id = sec_id;
+                }
+
+                let close_id = format!("{import_event_id}_close");
+                synthetic.push(EventRow {
+                    event_id: EventId(close_id),
+                    event_type: "close".to_owned(),
+                    section_name: None,
+                    payload: "{}".to_owned(),
+                    previous_id: Some(EventId(prev_id)),
+                    created_at,
+                });
+
+                return Ok(synthetic);
+            }
+        }
+
+        Ok(vec![])
     }
 
     /// Return all chapter metadata rows ordered by `opened_at` descending (newest first).
@@ -534,5 +662,155 @@ impl EventLog {
                 e
             })?;
         Ok(count as usize)
+    }
+
+    // ──────────────────────── import API ─────────────────────────────────
+
+    /// Begin a rusqlite transaction on the underlying connection.
+    ///
+    /// Returns a [`rusqlite::Transaction`] that auto-rolls-back on `Drop` unless
+    /// [`commit`](rusqlite::Transaction::commit) is called.  Use this to batch
+    /// multiple `append_import` calls (and the associated `chapter_meta` inserts)
+    /// into a single atomic write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventLogError::Sqlite`] if the transaction cannot be started
+    /// (e.g. a transaction is already open on this connection).
+    pub fn transaction(&mut self) -> Result<rusqlite::Transaction<'_>, EventLogError> {
+        self.conn.transaction().map_err(|e| {
+            tracing::warn!(error = ?e, "EventLog::transaction: failed to begin transaction");
+            EventLogError::Sqlite(e)
+        })
+    }
+
+    /// Insert a first-class `import` event row into `event_log` within `tx`.
+    ///
+    /// Also inserts one `chapter_meta` row per chapter listed in `payload.chapters`,
+    /// all within the same transaction scope.  The caller must call
+    /// [`tx.commit()`](rusqlite::Transaction::commit) to persist the writes.
+    ///
+    /// # Payload format
+    ///
+    /// ```json
+    /// {
+    ///   "source_path": "<path>",
+    ///   "source_hash": "<hex>",
+    ///   "migration_epoch_ms": 1234567890123,
+    ///   "chapters": [
+    ///     {
+    ///       "chapter_id": "<id>",
+    ///       "chapter_name": "<h2 literal>",
+    ///       "schema_id": "ytk-canonical-v1",
+    ///       "sections": [{ "section_name": "<h3>", "body": "<literal>" }]
+    ///     }
+    ///   ]
+    /// }
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `migration_id` — ULID string used as `stream_id` for the import event row.
+    /// * `payload` — structured import payload (see above).
+    /// * `tx` — active transaction to write into.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventLogError::Sqlite`] or [`EventLogError::Json`] on failure.
+    pub fn append_import(
+        migration_id: &str,
+        payload: &serde_json::Value,
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<i64, EventLogError> {
+        let event_id = Ulid::new().to_string();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(EventLogError::Time)?
+            .as_millis() as i64;
+        let payload_str = serde_json::to_string(payload).map_err(|e| {
+            tracing::warn!(error = ?e, "append_import: failed to serialise payload");
+            EventLogError::Json(e)
+        })?;
+
+        // Insert the single import event row (stream_id = migration_id).
+        tx.execute(
+            "INSERT INTO event_log
+             (event_id, stream_id, event_type, section_name, payload, previous_id, created_at)
+         VALUES (?1, ?2, 'import', NULL, ?3, NULL, ?4)",
+            rusqlite::params![event_id, migration_id, payload_str, now],
+        )
+        .map_err(|e| {
+            tracing::warn!(error = ?e, migration_id, "append_import: INSERT event_log failed");
+            EventLogError::Sqlite(e)
+        })?;
+
+        // Insert one chapter_meta row per imported chapter (state = "closed").
+        let empty = vec![];
+        let chapters = payload
+            .get("chapters")
+            .and_then(|c| c.as_array())
+            .unwrap_or(&empty);
+
+        for chapter in chapters {
+            let chapter_id = chapter
+                .get("chapter_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let schema_id = chapter
+                .get("schema_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ytk-canonical-v1");
+
+            if chapter_id.is_empty() {
+                tracing::warn!("append_import: skipping chapter with empty chapter_id");
+                continue;
+            }
+
+            tx.execute(
+                "INSERT INTO chapter_meta
+                 (chapter_id, schema_id, current_state, opened_at, closed_at)
+             VALUES (?1, ?2, 'closed', ?3, ?3)",
+                rusqlite::params![chapter_id, schema_id, now],
+            )
+            .map_err(|e| {
+                tracing::warn!(error = ?e, chapter_id, "append_import: INSERT chapter_meta failed");
+                EventLogError::Sqlite(e)
+            })?;
+        }
+
+        Ok(now)
+    }
+
+    /// Check whether a chapter with the given `chapter_id` already exists in `chapter_meta`.
+    ///
+    /// Used by [`JournalCore::import_chapter`] to detect collisions before
+    /// beginning the import transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventLogError::Sqlite`] on SQL failure.
+    pub fn chapter_exists(&self, chapter_id: &ChapterId) -> Result<bool, EventLogError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM chapter_meta WHERE chapter_id = ?1",
+                rusqlite::params![chapter_id.0],
+                |row| row.get(0),
+            )
+            .map_err(|e| {
+                tracing::warn!(error = ?e, chapter_id = %chapter_id, "chapter_exists: COUNT query failed");
+                EventLogError::Sqlite(e)
+            })?;
+        Ok(count > 0)
+    }
+
+    /// Compute a stable hex hash of `content` using `DefaultHasher`.
+    ///
+    /// Used for `source_hash` in import payloads.  Not cryptographically secure
+    /// but sufficient for change-detection purposes.
+    pub(crate) fn hash_content(content: &str) -> String {
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
     }
 }

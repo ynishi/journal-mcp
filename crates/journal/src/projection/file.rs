@@ -88,6 +88,10 @@ pub struct FileProjection {
     /// `BTreeMap` keeps chapter-ids in lexicographic order so that the
     /// assembled file is deterministically ordered by date slug.
     chapter_dumps: BTreeMap<String, String>,
+
+    /// Hash of the file content written by the most recent successful `write_atomic` call.
+    /// `None` if no write has occurred yet in this process session.
+    last_written_hash: Option<u64>,
 }
 
 impl FileProjection {
@@ -114,6 +118,7 @@ impl FileProjection {
             last_write_at: HashMap::new(),
             debounce_window,
             chapter_dumps: BTreeMap::new(),
+            last_written_hash: None,
         }
     }
 
@@ -360,18 +365,56 @@ impl FileProjection {
     ///
     /// Steps:
     /// 1. `fs::create_dir_all(parent)` — ensure parent directory exists.
-    /// 2. `NamedTempFile::new_in(parent)` — create tempfile in the **same**
+    /// 2. Hash-check + auto-backup: if `output_path` exists and its content hash
+    ///    differs from `last_written_hash` (or `last_written_hash` is `None`),
+    ///    rename the existing file to `<output_path>.bak.<epoch_ms>` before writing.
+    /// 3. `NamedTempFile::new_in(parent)` — create tempfile in the **same**
     ///    directory as the target (rename(2) requires same filesystem).
-    /// 3. `write_all(content)` — write content to the tempfile.
-    /// 4. `persist(output_path)` — atomic POSIX rename.
+    /// 4. `write_all(content)` — write content to the tempfile.
+    /// 5. `persist(output_path)` — atomic POSIX rename.
     ///
-    /// On any failure before step 4 the tempfile is dropped and cleaned up
+    /// On any failure before step 5 the tempfile is dropped and cleaned up
     /// automatically.  The target file is never touched until `persist`
-    /// succeeds (Crux 1).
-    fn write_atomic(&self, content: &str) -> Result<(), ProjectionError> {
+    /// succeeds (Crux 1).  If the backup rename fails in step 2, the function
+    /// returns early with `ProjectionError::Io` and no tempfile is created.
+    fn write_atomic(&mut self, content: &str) -> Result<(), ProjectionError> {
         let parent = self.output_path.parent().unwrap_or_else(|| Path::new("."));
 
         std::fs::create_dir_all(parent)?;
+
+        // Hash-check + auto-backup step (Crux: explicit-only render guard).
+        if self.output_path.exists() {
+            let existing = std::fs::read_to_string(&self.output_path)?;
+            let existing_hash = compute_hash(&existing);
+            let should_backup = match self.last_written_hash {
+                Some(prev) => prev != existing_hash,
+                // No previous write in this session: treat as possible external edit → backup.
+                None => true,
+            };
+            if should_backup {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let bak_path = self.output_path.with_extension(format!("md.bak.{ts}"));
+                tracing::warn!(
+                    target: "journal::projection::file",
+                    path = %self.output_path.display(),
+                    backup = %bak_path.display(),
+                    "external edit detected or first write over existing file; backing up"
+                );
+                std::fs::rename(&self.output_path, &bak_path).map_err(|e| {
+                    tracing::warn!(
+                        target: "journal::projection::file",
+                        path = %self.output_path.display(),
+                        backup = %bak_path.display(),
+                        error = %e,
+                        "backup rename failed; aborting write"
+                    );
+                    e
+                })?;
+            }
+        }
 
         let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
         tmp.write_all(content.as_bytes())?;
@@ -379,6 +422,9 @@ impl FileProjection {
 
         tmp.persist(&self.output_path)
             .map_err(|e| ProjectionError::Io(e.error))?;
+
+        // Record the hash of the content we just wrote.
+        self.last_written_hash = Some(compute_hash(content));
 
         tracing::debug!(
             target: "journal::projection::file",

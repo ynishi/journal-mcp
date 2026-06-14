@@ -9,9 +9,6 @@
 //!
 //! * `JOURNAL_PROJECT_ROOT` — root directory of the project.  Defaults to the
 //!   process's current working directory.
-//! * `JOURNAL_DISABLE_FILE_PROJECTION` — set to `"1"` to skip the automatic
-//!   [`FileProjection`](journal::FileProjection) attachment (useful for tests /
-//!   debugging environments where `workspace/journal.md` is unavailable).
 //!
 //! See `docs/design.md §6` for the full tool table and `§10 Step 5` for the
 //! stdio transport specification.
@@ -150,6 +147,18 @@ pub struct JournalProjectionRebuildParams {
 }
 
 // ---------------------------------------------------------------------------
+// ST7 parameter structs — import tool
+// ---------------------------------------------------------------------------
+
+/// Parameters for `journal_import`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalImportParams {
+    /// Filesystem path of the markdown file to import (absolute or relative to
+    /// `JOURNAL_PROJECT_ROOT`).
+    pub path: String,
+}
+
+// ---------------------------------------------------------------------------
 // Local output structs (not in the journal crate, MCP-layer only)
 // ---------------------------------------------------------------------------
 
@@ -184,7 +193,7 @@ struct ChapterListRow {
 ///
 /// # Crux invariants satisfied here
 ///
-/// * **Crux #1** (tool_router 一元 ServerHandler 配線): all 15 tools (ST6-1/ST6-2/ST6-3)
+/// * **Crux #1** (tool_router 一元 ServerHandler 配線): all 16 tools (ST6-1/ST6-2/ST6-3/ST7)
 ///   are registered in a single `#[tool_router] impl JournalMcpServer` block and
 ///   dispatched through `#[tool_handler] impl ServerHandler`.
 /// * **Crux #3** (stdio transport 固定配線): `main()` wires
@@ -211,14 +220,29 @@ impl JournalMcpServer {
     /// 1. Load the schema registry (`SchemaRegistry::with_project_local`).
     /// 2. Open (or create) the journal database at
     ///    `{project_root}/workspace/.journal.db`.
-    /// 3. Optionally attach a [`FileProjection`](journal::FileProjection) that
-    ///    writes to `{project_root}/workspace/journal.md` (skipped when
-    ///    `JOURNAL_DISABLE_FILE_PROJECTION=1`).
+    /// 3. Attach a [`FileProjection`](journal::FileProjection) that writes to
+    ///    `{project_root}/workspace/journal.md`.
+    ///
+    /// For tests that need to suppress FileProjection I/O, use
+    /// [`new_with_config`](Self::new_with_config) (available under `#[cfg(test)]`).
     ///
     /// # Errors
     ///
     /// Returns an error if the schema registry or database cannot be opened.
     pub fn new(project_root: PathBuf) -> anyhow::Result<Self> {
+        Self::build(project_root, true)
+    }
+
+    /// Internal constructor shared by `new` and the test-only `new_with_config`.
+    ///
+    /// When `attach_file_projection` is `true`, a [`FileProjection`](journal::FileProjection)
+    /// is attached at `{project_root}/workspace/journal.md`.  When `false`, no projection
+    /// is attached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the schema registry or database cannot be opened.
+    fn build(project_root: PathBuf, attach_file_projection: bool) -> anyhow::Result<Self> {
         let registry = journal::SchemaRegistry::with_project_local(&project_root)?;
 
         let db_dir = project_root.join("workspace");
@@ -230,11 +254,7 @@ impl JournalMcpServer {
         let registry_arc = std::sync::Arc::new(registry.clone());
         let mut core = journal::JournalCore::open(&db_path, registry)?;
 
-        // Auto-attach FileProjection unless disabled for testing/debugging.
-        let disable_fp = std::env::var("JOURNAL_DISABLE_FILE_PROJECTION")
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        if !disable_fp {
+        if attach_file_projection {
             let journal_md = db_dir.join("journal.md");
             let proj = journal::FileProjection::new(journal_md, registry_arc);
             core.add_projection(proj);
@@ -245,6 +265,27 @@ impl JournalMcpServer {
             core: Arc::new(Mutex::new(core)),
             project_root,
         })
+    }
+
+    /// Test-only constructor with explicit FileProjection control.
+    ///
+    /// Delegates to [`build`](Self::build) with the given `attach_file_projection`
+    /// flag.  Pass `false` to suppress projection I/O in unit tests so that all
+    /// file paths remain inside a `TempDir` (Crux #3 test-isolation requirement).
+    ///
+    /// This method is intentionally hidden from production builds.  If production
+    /// code needs FileProjection control in the future, promote `build` to `pub`
+    /// at that point (YAGNI for now).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the schema registry or database cannot be opened.
+    #[cfg(test)]
+    pub(crate) fn new_with_config(
+        project_root: PathBuf,
+        attach_file_projection: bool,
+    ) -> anyhow::Result<Self> {
+        Self::build(project_root, attach_file_projection)
     }
 }
 
@@ -738,7 +779,7 @@ impl JournalMcpServer {
 
     // -----------------------------------------------------------------------
     // Subtask 3: remaining 5 tools — open_chapters / progress_of / projection 3
-    // Crux #1 final: all 15 tools are in this single #[tool_router] block.
+    // ST7 adds journal_import as the 16th tool — all in this single #[tool_router] block.
     // -----------------------------------------------------------------------
 
     /// List all chapters that are still open (closed_at IS NULL).
@@ -917,6 +958,46 @@ impl JournalMcpServer {
         } // guard drops here — no await across the Mutex
         Ok(format!("projection '{}' rebuilt", params.name))
     }
+
+    /// Import chapters from an existing markdown file into the journal.
+    ///
+    /// Parses the file using ytk-canonical-v1 rules (h2=chapter, h3=section),
+    /// inserts all chapters in one atomic SQLite transaction, and returns a JSON
+    /// array of the chapter IDs that were imported.
+    ///
+    /// If any `chapter_id` already exists the entire batch is rolled back and an
+    /// error is returned (no partial state).  Projection rebuild is **not**
+    /// triggered automatically — invoke `journal_projection_rebuild` explicitly
+    /// after import if rendering is needed (Crux #1 explicit-only render policy).
+    #[tool(
+        name = "journal_import",
+        description = "Import chapters from a markdown file (ytk-canonical-v1: h2=chapter, h3=section). \
+                       Atomic batch insert — any chapter_id collision rolls back the entire batch. \
+                       Returns JSON array of imported chapter IDs. \
+                       Does NOT trigger projection rebuild (call journal_projection_rebuild explicitly).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn journal_import(
+        &self,
+        Parameters(params): Parameters<JournalImportParams>,
+    ) -> Result<String, String> {
+        let imported = {
+            // SAFETY: see journal_open_chapter
+            let mut core = self.core.lock().unwrap();
+            let path = std::path::PathBuf::from(&params.path);
+            core.import_chapter(&path).map_err(|e| {
+                tracing::warn!(error = ?e, path = %params.path, "journal_import failed");
+                e.to_string()
+            })?
+        }; // guard drops here — no await across the Mutex
+        let ids: Vec<&str> = imported.iter().map(|id| id.0.as_str()).collect();
+        Ok(serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1023,14 +1104,12 @@ mod tests {
 
     /// Build a `JournalMcpServer` backed by a temporary directory.
     ///
-    /// `JOURNAL_DISABLE_FILE_PROJECTION=1` is set so that `FileProjection`
-    /// does not attempt to write to the temp dir's `journal.md` during tests.
+    /// FileProjection is not attached (`attach_file_projection = false`) so that
+    /// tests do not touch the real filesystem outside the `TempDir` (Crux #3).
     fn make_server(tmp: &tempfile::TempDir) -> JournalMcpServer {
-        // Disable FileProjection to avoid IO side-effects in unit tests.
-        std::env::set_var("JOURNAL_DISABLE_FILE_PROJECTION", "1");
-        JournalMcpServer::new(tmp.path().to_path_buf())
-            // SAFETY: TempDir is kept alive by caller; new() creates workspace/ subdir.
-            .expect("JournalMcpServer::new should succeed in temp dir")
+        JournalMcpServer::new_with_config(tmp.path().to_path_buf(), false)
+            // SAFETY: TempDir is kept alive by caller; new_with_config() creates workspace/ subdir.
+            .expect("JournalMcpServer::new_with_config should succeed in temp dir")
     }
 
     /// T1 (property) — four lifecycle tools are registered in the tool_router.
@@ -1075,20 +1154,20 @@ mod tests {
         assert!(workspace.exists(), "workspace should be created by new()");
     }
 
-    /// T3 (error path) — tool_router now returns exactly 15 tools after ST3.
+    /// T3 (error path) — tool_router now returns exactly 16 tools after ST7.
     ///
-    /// Updated from "exactly 10 tools" in ST2 to "exactly 15 tools" in ST3
-    /// (4 lifecycle + 3 schema + 3 read + 5 projection/open_chapters/progress tools).
+    /// Updated from "exactly 15 tools" (ST3/ST6) to "exactly 16 tools" (ST7)
+    /// by adding `journal_import` as the 16th tool.
     ///
-    /// Verifies Crux #1: all 15 tools are wired into the single `#[tool_router]` block.
+    /// Verifies Crux #1: all 16 tools are wired into the single `#[tool_router]` block.
     #[test]
-    fn test_subtask3_exactly_fifteen_tools() {
+    fn test_st7_exactly_sixteen_tools() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
         let server = make_server(&tmp);
         let count = server.tool_router.list_all().len();
         assert_eq!(
-            count, 15,
-            "ST3 tool_router should have exactly 15 tools (Crux #1), got {count}"
+            count, 16,
+            "ST7 tool_router should have exactly 16 tools (Crux #1), got {count}"
         );
     }
 
@@ -1195,11 +1274,11 @@ mod tests {
     // ST3 integration tests — Crux #1 final: 15 tool full registration assert
     // -----------------------------------------------------------------------
 
-    /// Canonical spelling of all 15 MCP tools in the tool_router.
+    /// Canonical spelling of all 16 MCP tools in the tool_router (ST7 final).
     ///
     /// This constant is the authoritative list.  Changing this list is a
     /// Crux #1 or Crux #2 violation and requires human review.
-    const ALL_FIFTEEN_TOOLS: &[&str] = &[
+    const EXPECTED_TOOLS: &[&str] = &[
         // ST1: chapter lifecycle (4)
         "journal_open_chapter",
         "journal_append_section",
@@ -1219,24 +1298,26 @@ mod tests {
         "journal_projection_attach",
         "journal_projection_detach",
         "journal_projection_rebuild",
+        // ST7: import tool (1)
+        "journal_import",
     ];
 
-    /// T1 (property) — Crux #1 final: all 15 tools are registered in the
+    /// T1 (property) — Crux #1 final: all 16 tools are registered in the
     /// single `#[tool_router] impl JournalMcpServer` block.
     ///
-    /// This is the primary acceptance test for ST6 as a whole.
+    /// This is the primary acceptance test for ST7 as a whole.
     #[test]
-    fn test_all_fifteen_tools_registered() {
+    fn test_all_sixteen_tools_registered() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
         let server = make_server(&tmp);
         let tools = server.tool_router.list_all();
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert_eq!(
             tool_names.len(),
-            15,
-            "exactly 15 tools must be registered (Crux #1); got: {tool_names:?}"
+            16,
+            "exactly 16 tools must be registered (Crux #1 ST7); got: {tool_names:?}"
         );
-        for &name in ALL_FIFTEEN_TOOLS {
+        for &name in EXPECTED_TOOLS {
             assert!(
                 tool_names.contains(&name),
                 "tool '{name}' must be registered (Crux #1); registered: {tool_names:?}"
@@ -1307,6 +1388,78 @@ mod tests {
         assert!(
             result.is_err(),
             "progress_of for a nonexistent chapter should return Err"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ST7/ST3 isolation tests — new_with_config / TempDir-only path guarantee
+    // -----------------------------------------------------------------------
+
+    /// T1 (property) — `new_with_config(_, false)` succeeds and returns a
+    /// working server with no FileProjection attached.
+    ///
+    /// Verifies Crux #3: test-only constructor must succeed and all file paths
+    /// must remain inside the TempDir (no real workspace/journal.md touched).
+    #[test]
+    fn test_new_with_config_no_fp_succeeds() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let result = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), false);
+        assert!(
+            result.is_ok(),
+            "new_with_config(_, false) should return Ok; got: {:?}",
+            result.err()
+        );
+        // The workspace directory must have been created inside TempDir.
+        let workspace = tmp.path().join("workspace");
+        assert!(
+            workspace.exists(),
+            "workspace dir should be created inside TempDir by new_with_config"
+        );
+        // The real workspace/journal.md outside TempDir must NOT be created.
+        let real_journal_md = tmp.path().join("workspace").join("journal.md");
+        assert!(
+            !real_journal_md.exists(),
+            "journal.md must not be created when attach_file_projection=false; \
+             path: {real_journal_md:?}"
+        );
+    }
+
+    /// T2 (boundary) — `new_with_config(_, true)` attaches FileProjection and
+    /// creates `workspace/journal.md` inside TempDir on first rebuild.
+    ///
+    /// When `attach_file_projection = true` the projection is wired up but the
+    /// file is only written on explicit `journal_projection_rebuild`.  Verifies
+    /// the server can be constructed successfully with projection attached.
+    #[test]
+    fn test_new_with_config_with_fp_constructs_ok() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let result = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), true);
+        assert!(
+            result.is_ok(),
+            "new_with_config(_, true) should return Ok; got: {:?}",
+            result.err()
+        );
+    }
+
+    /// T3 (error path) — `new_with_config` propagates an error when the project
+    /// root cannot have its workspace subdir created (invalid nested path).
+    ///
+    /// Uses a path that cannot be created because its parent is a file, not
+    /// a directory, triggering `std::fs::create_dir_all` failure.
+    #[test]
+    fn test_new_with_config_returns_err_on_bad_root() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        // Create a regular file where `workspace` would need to be a directory.
+        let blocker = tmp.path().join("workspace");
+        std::fs::write(&blocker, b"blocking file").expect("write should succeed");
+        // Now attempt to use `workspace/subpath` as the project root — the
+        // `workspace` segment is a file, so `create_dir_all` of its "workspace"
+        // child must fail.
+        let nested_root = blocker.join("subpath");
+        let result = JournalMcpServer::new_with_config(nested_root, false);
+        assert!(
+            result.is_err(),
+            "new_with_config should return Err when workspace dir cannot be created"
         );
     }
 }
