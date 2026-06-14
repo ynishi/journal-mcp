@@ -9,9 +9,6 @@
 //!
 //! * `JOURNAL_PROJECT_ROOT` — root directory of the project.  Defaults to the
 //!   process's current working directory.
-//! * `JOURNAL_DISABLE_FILE_PROJECTION` — set to `"1"` to skip the automatic
-//!   [`FileProjection`](journal::FileProjection) attachment (useful for tests /
-//!   debugging environments where `workspace/journal.md` is unavailable).
 //!
 //! See `docs/design.md §6` for the full tool table and `§10 Step 5` for the
 //! stdio transport specification.
@@ -223,14 +220,29 @@ impl JournalMcpServer {
     /// 1. Load the schema registry (`SchemaRegistry::with_project_local`).
     /// 2. Open (or create) the journal database at
     ///    `{project_root}/workspace/.journal.db`.
-    /// 3. Optionally attach a [`FileProjection`](journal::FileProjection) that
-    ///    writes to `{project_root}/workspace/journal.md` (skipped when
-    ///    `JOURNAL_DISABLE_FILE_PROJECTION=1`).
+    /// 3. Attach a [`FileProjection`](journal::FileProjection) that writes to
+    ///    `{project_root}/workspace/journal.md`.
+    ///
+    /// For tests that need to suppress FileProjection I/O, use
+    /// [`new_with_config`](Self::new_with_config) (available under `#[cfg(test)]`).
     ///
     /// # Errors
     ///
     /// Returns an error if the schema registry or database cannot be opened.
     pub fn new(project_root: PathBuf) -> anyhow::Result<Self> {
+        Self::build(project_root, true)
+    }
+
+    /// Internal constructor shared by `new` and the test-only `new_with_config`.
+    ///
+    /// When `attach_file_projection` is `true`, a [`FileProjection`](journal::FileProjection)
+    /// is attached at `{project_root}/workspace/journal.md`.  When `false`, no projection
+    /// is attached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the schema registry or database cannot be opened.
+    fn build(project_root: PathBuf, attach_file_projection: bool) -> anyhow::Result<Self> {
         let registry = journal::SchemaRegistry::with_project_local(&project_root)?;
 
         let db_dir = project_root.join("workspace");
@@ -242,11 +254,7 @@ impl JournalMcpServer {
         let registry_arc = std::sync::Arc::new(registry.clone());
         let mut core = journal::JournalCore::open(&db_path, registry)?;
 
-        // Auto-attach FileProjection unless disabled for testing/debugging.
-        let disable_fp = std::env::var("JOURNAL_DISABLE_FILE_PROJECTION")
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        if !disable_fp {
+        if attach_file_projection {
             let journal_md = db_dir.join("journal.md");
             let proj = journal::FileProjection::new(journal_md, registry_arc);
             core.add_projection(proj);
@@ -257,6 +265,27 @@ impl JournalMcpServer {
             core: Arc::new(Mutex::new(core)),
             project_root,
         })
+    }
+
+    /// Test-only constructor with explicit FileProjection control.
+    ///
+    /// Delegates to [`build`](Self::build) with the given `attach_file_projection`
+    /// flag.  Pass `false` to suppress projection I/O in unit tests so that all
+    /// file paths remain inside a `TempDir` (Crux #3 test-isolation requirement).
+    ///
+    /// This method is intentionally hidden from production builds.  If production
+    /// code needs FileProjection control in the future, promote `build` to `pub`
+    /// at that point (YAGNI for now).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the schema registry or database cannot be opened.
+    #[cfg(test)]
+    pub(crate) fn new_with_config(
+        project_root: PathBuf,
+        attach_file_projection: bool,
+    ) -> anyhow::Result<Self> {
+        Self::build(project_root, attach_file_projection)
     }
 }
 
@@ -1075,14 +1104,12 @@ mod tests {
 
     /// Build a `JournalMcpServer` backed by a temporary directory.
     ///
-    /// `JOURNAL_DISABLE_FILE_PROJECTION=1` is set so that `FileProjection`
-    /// does not attempt to write to the temp dir's `journal.md` during tests.
+    /// FileProjection is not attached (`attach_file_projection = false`) so that
+    /// tests do not touch the real filesystem outside the `TempDir` (Crux #3).
     fn make_server(tmp: &tempfile::TempDir) -> JournalMcpServer {
-        // Disable FileProjection to avoid IO side-effects in unit tests.
-        std::env::set_var("JOURNAL_DISABLE_FILE_PROJECTION", "1");
-        JournalMcpServer::new(tmp.path().to_path_buf())
-            // SAFETY: TempDir is kept alive by caller; new() creates workspace/ subdir.
-            .expect("JournalMcpServer::new should succeed in temp dir")
+        JournalMcpServer::new_with_config(tmp.path().to_path_buf(), false)
+            // SAFETY: TempDir is kept alive by caller; new_with_config() creates workspace/ subdir.
+            .expect("JournalMcpServer::new_with_config should succeed in temp dir")
     }
 
     /// T1 (property) — four lifecycle tools are registered in the tool_router.
@@ -1361,6 +1388,78 @@ mod tests {
         assert!(
             result.is_err(),
             "progress_of for a nonexistent chapter should return Err"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ST7/ST3 isolation tests — new_with_config / TempDir-only path guarantee
+    // -----------------------------------------------------------------------
+
+    /// T1 (property) — `new_with_config(_, false)` succeeds and returns a
+    /// working server with no FileProjection attached.
+    ///
+    /// Verifies Crux #3: test-only constructor must succeed and all file paths
+    /// must remain inside the TempDir (no real workspace/journal.md touched).
+    #[test]
+    fn test_new_with_config_no_fp_succeeds() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let result = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), false);
+        assert!(
+            result.is_ok(),
+            "new_with_config(_, false) should return Ok; got: {:?}",
+            result.err()
+        );
+        // The workspace directory must have been created inside TempDir.
+        let workspace = tmp.path().join("workspace");
+        assert!(
+            workspace.exists(),
+            "workspace dir should be created inside TempDir by new_with_config"
+        );
+        // The real workspace/journal.md outside TempDir must NOT be created.
+        let real_journal_md = tmp.path().join("workspace").join("journal.md");
+        assert!(
+            !real_journal_md.exists(),
+            "journal.md must not be created when attach_file_projection=false; \
+             path: {real_journal_md:?}"
+        );
+    }
+
+    /// T2 (boundary) — `new_with_config(_, true)` attaches FileProjection and
+    /// creates `workspace/journal.md` inside TempDir on first rebuild.
+    ///
+    /// When `attach_file_projection = true` the projection is wired up but the
+    /// file is only written on explicit `journal_projection_rebuild`.  Verifies
+    /// the server can be constructed successfully with projection attached.
+    #[test]
+    fn test_new_with_config_with_fp_constructs_ok() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let result = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), true);
+        assert!(
+            result.is_ok(),
+            "new_with_config(_, true) should return Ok; got: {:?}",
+            result.err()
+        );
+    }
+
+    /// T3 (error path) — `new_with_config` propagates an error when the project
+    /// root cannot have its workspace subdir created (invalid nested path).
+    ///
+    /// Uses a path that cannot be created because its parent is a file, not
+    /// a directory, triggering `std::fs::create_dir_all` failure.
+    #[test]
+    fn test_new_with_config_returns_err_on_bad_root() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        // Create a regular file where `workspace` would need to be a directory.
+        let blocker = tmp.path().join("workspace");
+        std::fs::write(&blocker, b"blocking file").expect("write should succeed");
+        // Now attempt to use `workspace/subpath` as the project root — the
+        // `workspace` segment is a file, so `create_dir_all` of its "workspace"
+        // child must fail.
+        let nested_root = blocker.join("subpath");
+        let result = JournalMcpServer::new_with_config(nested_root, false);
+        assert!(
+            result.is_err(),
+            "new_with_config should return Err when workspace dir cannot be created"
         );
     }
 }
