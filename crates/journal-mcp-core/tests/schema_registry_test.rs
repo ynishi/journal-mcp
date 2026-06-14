@@ -10,7 +10,7 @@
 //!   with the same `schema_id` + `version` as a built-in schema shadows the
 //!   built-in (L2 overrides L1).
 
-use journal::{ChapterSchema, SchemaError, SchemaRegistry};
+use journal_mcp_core::{ChapterSchema, SchemaError, SchemaRegistry};
 
 // ---------------------------------------------------------------------------
 // T1: parse three built-ins and fetch

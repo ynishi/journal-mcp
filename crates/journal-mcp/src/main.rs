@@ -1,6 +1,6 @@
-//! journal-mcp — stdio MCP server exposing the `journal` library.
+//! journal-mcp — stdio MCP server exposing the `journal-mcp-core` library.
 //!
-//! Exposes the `journal` crate as an MCP server over stdio transport.
+//! Exposes the `journal-mcp-core` crate as an MCP server over stdio transport.
 //! All tools are registered in a single [`#[tool_router]`](rmcp::tool_router) block
 //! on [`JournalMcpServer`], satisfying the Crux #1 (tool_router 一元 ServerHandler 配線)
 //! constraint.
@@ -185,9 +185,9 @@ struct ChapterListRow {
 // JournalMcpServer
 // ---------------------------------------------------------------------------
 
-/// MCP server for the `journal` library.
+/// MCP server for the `journal-mcp-core` library.
 ///
-/// Wraps a [`journal::JournalCore`] behind an `Arc<Mutex<…>>` so that the
+/// Wraps a [`journal_mcp_core::JournalCore`] behind an `Arc<Mutex<…>>` so that the
 /// server can be cloned per-connection as required by rmcp while the core
 /// remains single-writer.
 ///
@@ -206,7 +206,7 @@ pub struct JournalMcpServer {
     tool_router: ToolRouter<Self>,
     /// Shared mutable journal core — single writer, `std::sync::Mutex` is
     /// sufficient because we never `.await` while holding the lock guard.
-    core: Arc<Mutex<journal::JournalCore>>,
+    core: Arc<Mutex<journal_mcp_core::JournalCore>>,
     /// Project root directory; retained for tools that need filesystem context.
     #[allow(dead_code)]
     project_root: PathBuf,
@@ -220,7 +220,7 @@ impl JournalMcpServer {
     /// 1. Load the schema registry (`SchemaRegistry::with_project_local`).
     /// 2. Open (or create) the journal database at
     ///    `{project_root}/workspace/.journal.db`.
-    /// 3. Attach a [`FileProjection`](journal::FileProjection) that writes to
+    /// 3. Attach a [`FileProjection`](journal_mcp_core::FileProjection) that writes to
     ///    `{project_root}/workspace/journal.md`.
     ///
     /// For tests that need to suppress FileProjection I/O, use
@@ -235,7 +235,7 @@ impl JournalMcpServer {
 
     /// Internal constructor shared by `new` and the test-only `new_with_config`.
     ///
-    /// When `attach_file_projection` is `true`, a [`FileProjection`](journal::FileProjection)
+    /// When `attach_file_projection` is `true`, a [`FileProjection`](journal_mcp_core::FileProjection)
     /// is attached at `{project_root}/workspace/journal.md`.  When `false`, no projection
     /// is attached.
     ///
@@ -243,7 +243,7 @@ impl JournalMcpServer {
     ///
     /// Returns an error if the schema registry or database cannot be opened.
     fn build(project_root: PathBuf, attach_file_projection: bool) -> anyhow::Result<Self> {
-        let registry = journal::SchemaRegistry::with_project_local(&project_root)?;
+        let registry = journal_mcp_core::SchemaRegistry::with_project_local(&project_root)?;
 
         let db_dir = project_root.join("workspace");
         // Ensure the workspace directory exists so SQLite can create the DB file.
@@ -252,11 +252,11 @@ impl JournalMcpServer {
 
         // Clone the registry before consuming it; FileProjection needs an Arc.
         let registry_arc = std::sync::Arc::new(registry.clone());
-        let mut core = journal::JournalCore::open(&db_path, registry)?;
+        let mut core = journal_mcp_core::JournalCore::open(&db_path, registry)?;
 
         if attach_file_projection {
             let journal_md = db_dir.join("journal.md");
-            let proj = journal::FileProjection::new(journal_md, registry_arc);
+            let proj = journal_mcp_core::FileProjection::new(journal_md, registry_arc);
             core.add_projection(proj);
         }
 
@@ -349,7 +349,7 @@ impl JournalMcpServer {
         &self,
         Parameters(params): Parameters<JournalAppendSectionParams>,
     ) -> Result<String, String> {
-        let chapter_id = journal::ChapterId(params.chapter_id);
+        let chapter_id = journal_mcp_core::ChapterId(params.chapter_id);
         let warnings = {
             // SAFETY: see journal_open_chapter
             let mut core = self.core.lock().unwrap();
@@ -386,7 +386,7 @@ impl JournalMcpServer {
         &self,
         Parameters(params): Parameters<JournalAppendProgressParams>,
     ) -> Result<String, String> {
-        let chapter_id = journal::ChapterId(params.chapter_id);
+        let chapter_id = journal_mcp_core::ChapterId(params.chapter_id);
         let warnings = {
             // SAFETY: see journal_open_chapter
             let mut core = self.core.lock().unwrap();
@@ -423,7 +423,7 @@ impl JournalMcpServer {
         &self,
         Parameters(params): Parameters<JournalCloseChapterParams>,
     ) -> Result<String, String> {
-        let chapter_id = journal::ChapterId(params.chapter_id);
+        let chapter_id = journal_mcp_core::ChapterId(params.chapter_id);
         {
             // SAFETY: see journal_open_chapter
             let mut core = self.core.lock().unwrap();
@@ -835,7 +835,7 @@ impl JournalMcpServer {
         &self,
         Parameters(params): Parameters<JournalProgressOfParams>,
     ) -> Result<String, String> {
-        let chapter_id = journal::ChapterId(params.chapter_id);
+        let chapter_id = journal_mcp_core::ChapterId(params.chapter_id);
         let entries = {
             // SAFETY: see journal_open_chapter
             let core = self.core.lock().unwrap();
@@ -1004,12 +1004,12 @@ impl JournalMcpServer {
 // Local helpers (MCP-layer serialisation utilities)
 // ---------------------------------------------------------------------------
 
-/// Convert a [`journal::ChapterReplay`] to a `serde_json::Value`.
+/// Convert a [`journal_mcp_core::ChapterReplay`] to a `serde_json::Value`.
 ///
 /// `ChapterReplay` (and `ChapterMeta` / `EventRow`) do not derive `Serialize`
 /// in the `journal` crate (to keep the library layer clean).  This helper
 /// provides the MCP-layer projection without polluting the library.
-fn chapter_replay_to_json(replay: &journal::ChapterReplay) -> serde_json::Value {
+fn chapter_replay_to_json(replay: &journal_mcp_core::ChapterReplay) -> serde_json::Value {
     let events: Vec<serde_json::Value> = replay
         .events
         .iter()
@@ -1384,7 +1384,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
         let server = make_server(&tmp);
         let core = server.core.lock().expect("Mutex should not be poisoned");
-        let result = core.progress_of(&journal::ChapterId("nonexistent-id".to_string()));
+        let result = core.progress_of(&journal_mcp_core::ChapterId("nonexistent-id".to_string()));
         assert!(
             result.is_err(),
             "progress_of for a nonexistent chapter should return Err"

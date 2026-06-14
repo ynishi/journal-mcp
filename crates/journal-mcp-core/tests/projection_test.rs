@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use journal::{
+use journal_mcp_core::{
     ChapterId, ChapterMeta, ChapterReplay, EventId, EventRow, FileProjection, JournalProjection,
     SchemaRegistry,
 };
@@ -400,7 +400,7 @@ fn test_schema_driven_render_ytk_canonical() {
 /// changes the output prefix.
 #[test]
 fn test_schema_driven_render_alt_schema() {
-    use journal::ChapterSchema;
+    use journal_mcp_core::ChapterSchema;
 
     // Suppress unused-import warning for direct use of ChapterSchema in this test.
     let _ = ChapterSchema::parse_str(ALT_SCHEMA_YAML).expect("parse alt schema is valid yaml");

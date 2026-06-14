@@ -6,7 +6,7 @@
 //! - T3 close_requires_check: close fails when required sections are absent or empty
 //! - T4 hook_keyword_detect: hooks on Decided section emit HookWarning
 
-use journal::{HookWarning, JournalCore, JournalError, SchemaRegistry};
+use journal_mcp_core::{HookWarning, JournalCore, JournalError, SchemaRegistry};
 
 // ---------------------------------------------------------------------------
 // Helpers

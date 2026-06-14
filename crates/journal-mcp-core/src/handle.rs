@@ -19,7 +19,7 @@
 //! produces a compile error, not a runtime error.
 //!
 //! ```compile_fail
-//! use journal::handle::{ChapterHandle, Closed};
+//! use journal_mcp_core::handle::{ChapterHandle, Closed};
 //! fn _illegal(h: ChapterHandle<Closed>) {
 //!     let _ = h.close(); // no method named `close` on `ChapterHandle<Closed>`
 //! }

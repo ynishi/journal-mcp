@@ -8,7 +8,7 @@
 use std::thread;
 use std::time::Duration;
 
-use journal::{ChapterId, EventLog};
+use journal_mcp_core::{ChapterId, EventLog};
 
 /// T1 — Happy path: open a chapter, append three sections, close, then replay.
 ///

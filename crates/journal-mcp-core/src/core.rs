@@ -1119,7 +1119,7 @@ mod tests {
     }
 
     // Crux: impl private::Sealed here is permitted because core.rs is within
-    // the `journal` crate, and `projection::private` is `pub(crate)`.
+    // the `journal-mcp-core` crate, and `projection::private` is `pub(crate)`.
     impl private::Sealed for TestProjection {}
 
     impl JournalProjection for TestProjection {

@@ -40,7 +40,7 @@ See `docs/design.md` for the full design specification. See `CHANGELOG.md` for w
 journal-mcp/
 ├── Cargo.toml             # workspace (rmcp, schemars, serde_json, tracing-subscriber added ST6)
 ├── crates/
-│   ├── journal/           # core library
+│   ├── journal-mcp-core/  # core library
 │   │   ├── embed/
 │   │   │   ├── ytk_canonical_v1.yaml  # ST2: built-in canonical journal schema (compile-time embed)
 │   │   │   ├── madr_v1.yaml           # ST2: built-in ADR schema (compile-time embed)

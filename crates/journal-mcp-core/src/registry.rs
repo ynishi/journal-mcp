@@ -25,7 +25,7 @@ use crate::schema::{ChapterSchema, SchemaError};
 // Compile-time embedded assets
 // ---------------------------------------------------------------------------
 
-/// All YAML files under `crates/journal/embed/` are compiled into the binary.
+/// All YAML files under `crates/journal-mcp-core/embed/` are compiled into the binary.
 ///
 /// The folder path is relative to the crate's `Cargo.toml` directory (K-48).
 #[derive(RustEmbed)]

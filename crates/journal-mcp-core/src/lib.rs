@@ -1,4 +1,4 @@
-//! `journal` — project canonical history primitive.
+//! `journal-mcp-core` — project canonical history primitive.
 //!
 //! Provides [`JournalCore`] for schema-driven chapter lifecycle management,
 //! [`EventLog`] for append-only persistence, [`SchemaRegistry`] for schema

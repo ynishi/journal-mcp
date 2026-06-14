@@ -412,7 +412,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "journal"
+name = "journal-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "journal-mcp-core",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "journal-mcp-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -425,25 +444,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "ulid",
-]
-
-[[package]]
-name = "journal-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "journal",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

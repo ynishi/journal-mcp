@@ -88,14 +88,14 @@ journal-mcp/
     └── journal-mcp      ← stdio MCP server binary (journal を rmcp-tools で expose)
 ```
 
-`journal` crate 内部:
+`journal-mcp-core` crate 内部:
 - `JournalCore` (state transition engine + section policy enforcer)
 - `ChapterSchema` (YAML parser + State Machine spec)
 - `SchemaRegistry` (built-in schemas + project-local schemas)
 - `EventLog` (canonical SoT、 SQLite 固定)
 - `JournalProjection` trait (sealed) + 各 projection 実装
 
-将来 lds 統合時は `crates/journal` を lds repo に move + lds 側で MCP tool 配線、 `journal-mcp` binary は deprecate or 並走の判断を別 issue で。 API 形状 (`JournalCore` 直呼出し可能 + MCP stdio 経由可能) は両 path で互換になる form に凍結する。
+将来 lds 統合時は `crates/journal-mcp-core` を lds repo に move + lds 側で MCP tool 配線、 `journal-mcp` binary は deprecate or 並走の判断を別 issue で。 API 形状 (`JournalCore` 直呼出し可能 + MCP stdio 経由可能) は両 path で互換になる form に凍結する。
 
 ## 4. Architecture
 
@@ -527,15 +527,15 @@ render template は active schema の `render.file_projection` から取得し�
 
 ## 10. 段階 (実装 step)
 
-1. **standalone repo `journal-mcp` 起こす** — `~/projects/cc-x/journal-mcp/` に `crates/journal` (core library) + `crates/journal-mcp` (stdio MCP binary) の 2 crate workspace 構成
-2. **crate `journal` 中身** — Core 型 + EventLog (SQLite + trigger + ULID + chapter_meta) + ChapterSchema parser (YAML) + SchemaRegistry + sealed JournalProjection trait
+1. **standalone repo `journal-mcp` 起こす** — `~/projects/cc-x/journal-mcp/` に `crates/journal-mcp-core` (core library) + `crates/journal-mcp` (stdio MCP binary) の 2 crate workspace 構成
+2. **crate `journal-mcp-core` 中身** — Core 型 + EventLog (SQLite + trigger + ULID + chapter_meta) + ChapterSchema parser (YAML) + SchemaRegistry + sealed JournalProjection trait
 3. **built-in schema 同梱** — `ytk-canonical-v1` / `madr-v1` / `minimal-v1` を crate 内 embed
 4. **FileProjection 実装** — content-hash + chapter dirty marking + debounce rebuild + atomic write + schema 由来 render template
 5. **MCP tool 配線** — `crates/journal-mcp` で `journal_*` tool 群 (schema 操作 3 本含む) を `#[tool_router]` で expose、 stdio transport
 6. **dogfood** — local-develop-server / algocline / agent-profiles で `ytk-canonical-v1` 運用、 持ち越し宣言 hint を warn return で AI 側 self-check トリガー
 7. **他 Projection opt-in** — Outline / MiniApp / Gh
 8. **schema 拡張機能** — schema inheritance / overlay (§13 非 goal からの昇格時、 別 issue)
-9. **lds 統合検討** — API / Projection / Schema 安定後、 `crates/journal` を lds repo に move + lds 側 MCP tool 配線、 standalone binary deprecate 判断 (別 issue、 §1.5.3 参照)
+9. **lds 統合検討** — API / Projection / Schema 安定後、 `crates/journal-mcp-core` を lds repo に move + lds 側 MCP tool 配線、 standalone binary deprecate 判断 (別 issue、 §1.5.3 参照)
 
 ## 11. 既存運用との位置関係
 

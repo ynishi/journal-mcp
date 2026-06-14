@@ -12,20 +12,20 @@
 //! crates cannot satisfy the [`private::Sealed`] super-trait requirement:
 //!
 //! ```compile_fail
-//! use journal::JournalProjection;
+//! use journal_mcp_core::JournalProjection;
 //! struct External;
 //! impl JournalProjection for External {
 //!     fn name(&self) -> &'static str { "external" }
 //!     fn mark_dirty(
 //!         &mut self,
-//!         _id: &journal::ChapterId,
-//!     ) -> Result<(), journal::ProjectionError> {
+//!         _id: &journal_mcp_core::ChapterId,
+//!     ) -> Result<(), journal_mcp_core::ProjectionError> {
 //!         Ok(())
 //!     }
 //!     fn rebuild_chapter(
 //!         &mut self,
-//!         _replay: &journal::ChapterReplay,
-//!     ) -> Result<(), journal::ProjectionError> {
+//!         _replay: &journal_mcp_core::ChapterReplay,
+//!     ) -> Result<(), journal_mcp_core::ProjectionError> {
 //!         Ok(())
 //!     }
 //! }
@@ -87,7 +87,7 @@ pub enum ProjectionError {
 /// # Sealed
 ///
 /// This trait is sealed (see the module-level doc).  Only types inside the
-/// `journal` crate may implement it.
+/// `journal-mcp-core` crate may implement it.
 pub trait JournalProjection: private::Sealed + Send {
     /// Stable, lowercase identifier for this projection type.
     ///
