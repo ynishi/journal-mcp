@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_(no entries yet)_
+
+## [0.1.0] — 2026-06-14
+
 ### Added
 
 - `crates/journal-mcp-core/src/event_log.rs`: fifth event type `import` added to EventLog schema (ST7)
