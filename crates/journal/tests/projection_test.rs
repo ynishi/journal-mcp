@@ -455,6 +455,153 @@ fn test_schema_driven_render_alt_schema() {
 }
 
 // ---------------------------------------------------------------------------
+// T8 (ST7 Crux #1): hash-check + auto-backup guard
+// ---------------------------------------------------------------------------
+
+/// T8a — external edit between two rebuilds triggers a `.bak.*` file.
+///
+/// Scenario:
+/// 1. First `rebuild_chapter` → writes `journal.md`.
+/// 2. Simulate an external edit by writing a different string directly.
+/// 3. Second `rebuild_chapter` → detects hash mismatch → renames `journal.md`
+///    to `journal.md.bak.<epoch_ms>` before writing the new content.
+///
+/// Also covers AC 4: when `last_written_hash` is `None` and an existing file
+/// is present, the file is backed up (safe-side policy).
+#[test]
+fn test_external_edit_triggers_backup() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out_path = tmp.path().join("journal.md");
+    let mut fp = make_fp(out_path.clone());
+
+    let replay = make_replay("2026-06-14");
+
+    // First rebuild: writes journal.md and records last_written_hash.
+    fp.rebuild_chapter(&replay)
+        .expect("first rebuild should succeed");
+    assert!(
+        out_path.exists(),
+        "journal.md must exist after first rebuild"
+    );
+
+    // Simulate an external edit (different content, different hash).
+    std::fs::write(
+        &out_path,
+        b"externally modified content that differs from rendered",
+    )
+    .expect("simulate external edit");
+
+    // Second rebuild: hash mismatch → backup expected.
+    fp.rebuild_chapter(&replay)
+        .expect("second rebuild should succeed");
+
+    // Verify: a .bak.* file exists in the same directory.
+    let bak_files: Vec<_> = std::fs::read_dir(tmp.path())
+        .expect("read_dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("journal.md.bak."))
+        .collect();
+    assert_eq!(
+        bak_files.len(),
+        1,
+        "exactly one .bak.* file should be created after external edit; found: {:?}",
+        bak_files.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+    );
+
+    // Verify the backup contains the externally modified content.
+    let bak_content = std::fs::read_to_string(bak_files[0].path()).expect("read bak file");
+    assert!(
+        bak_content.contains("externally modified content"),
+        "backup must contain the externally modified content"
+    );
+
+    // Verify journal.md now has the fresh render (not the external edit).
+    let current = std::fs::read_to_string(&out_path).expect("read journal.md after second rebuild");
+    assert!(
+        !current.contains("externally modified content"),
+        "journal.md must not contain the external edit after rebuild"
+    );
+}
+
+/// T8b — first write over a pre-existing file (last_written_hash is None) triggers backup.
+///
+/// Simulates the case where a `FileProjection` instance is created fresh (e.g.,
+/// server restart) but `journal.md` already exists on disk.  The first rebuild
+/// must back up the existing file before writing (safe-side policy per AC 4).
+#[test]
+fn test_first_write_with_preexisting_file_backs_up() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out_path = tmp.path().join("journal.md");
+
+    // Write a pre-existing journal.md before creating the FileProjection.
+    std::fs::write(&out_path, b"pre-existing content from previous run")
+        .expect("write pre-existing file");
+
+    // Create a fresh FileProjection (last_written_hash = None).
+    let mut fp = make_fp(out_path.clone());
+
+    let replay = make_replay("2026-06-14");
+    fp.rebuild_chapter(&replay)
+        .expect("first rebuild over pre-existing file should succeed");
+
+    // A .bak.* file must exist (None case = safe-side backup).
+    let bak_files: Vec<_> = std::fs::read_dir(tmp.path())
+        .expect("read_dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("journal.md.bak."))
+        .collect();
+    assert_eq!(
+        bak_files.len(),
+        1,
+        "pre-existing file must be backed up when last_written_hash is None"
+    );
+
+    let bak_content = std::fs::read_to_string(bak_files[0].path()).expect("read bak file");
+    assert!(
+        bak_content.contains("pre-existing content"),
+        "backup must contain the original pre-existing content"
+    );
+}
+
+/// T8c — consecutive rebuilds with identical content do not create a backup.
+///
+/// After the first rebuild, `last_written_hash` is set.  A second rebuild
+/// with the same chapter content produces the same rendered output.  Since the
+/// hash matches, no backup must be created.
+#[test]
+fn test_no_backup_when_hash_matches() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out_path = tmp.path().join("journal.md");
+    let mut fp = make_fp(out_path.clone());
+
+    let replay = make_replay("2026-06-14");
+
+    // First rebuild writes journal.md and sets last_written_hash.
+    fp.rebuild_chapter(&replay)
+        .expect("first rebuild should succeed");
+
+    // Second rebuild with identical content: should_skip is false here because
+    // debounce is ZERO (make_fp uses Duration::ZERO), but write_atomic is still
+    // called with the same assembled content.  Since last_written_hash matches
+    // the file on disk, no backup should be created.
+    fp.rebuild_chapter(&replay)
+        .expect("second rebuild with same content should succeed");
+
+    // No .bak.* file should exist.
+    let bak_files: Vec<_> = std::fs::read_dir(tmp.path())
+        .expect("read_dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("journal.md.bak."))
+        .collect();
+    assert_eq!(
+        bak_files.len(),
+        0,
+        "no .bak.* file should be created when content hash matches; found: {:?}",
+        bak_files.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // T7 — multi-chapter same file
 // ---------------------------------------------------------------------------
 

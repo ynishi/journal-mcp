@@ -462,31 +462,6 @@ impl JournalCore {
             e
         })?;
 
-        // Re-fetch the full replay after close so projections receive the
-        // complete chapter including the close event.
-        let final_replay = self.log.chapter(id).map_err(|e| {
-            tracing::warn!(
-                target: "journal::core",
-                error = ?e,
-                chapter_id = %id,
-                "close_chapter: projection replay fetch failed"
-            );
-            e
-        })?;
-
-        // Dispatch to registered projections.
-        for p in &mut self.projections {
-            p.rebuild_chapter(&final_replay).map_err(|e| {
-                tracing::warn!(
-                    target: "journal::core",
-                    error = ?e,
-                    chapter_id = %id,
-                    "close_chapter: projection.rebuild_chapter failed"
-                );
-                e
-            })?;
-        }
-
         Ok(())
     }
 
@@ -915,14 +890,14 @@ mod tests {
         (core, dir)
     }
 
-    /// T3 — dispatch wiring: projection callbacks are fired for append_section
-    /// and close_chapter.
+    /// T3 — dispatch wiring: `mark_dirty` is called for each `append_section`;
+    /// `close_chapter` does NOT trigger `rebuild_chapter` (ST7 explicit-only render).
     ///
     /// Verifies:
     /// - `mark_dirty` is called once per `append_section` call.
-    /// - `rebuild_chapter` is called once per `close_chapter` call.
+    /// - `rebuild_chapter` is NOT called by `close_chapter` (Crux #1).
     #[test]
-    fn test_dispatch_wiring() {
+    fn test_close_chapter_does_not_trigger_rebuild() {
         let (mut core, _dir) = make_core_for_test();
 
         let mark_count = Arc::new(AtomicUsize::new(0));
@@ -958,11 +933,57 @@ mod tests {
         core.close_chapter(&id)
             .expect("close_chapter should succeed");
 
-        // close_chapter should trigger rebuild_chapter exactly once.
+        // ST7: close_chapter must NOT trigger rebuild_chapter (explicit-only render policy).
+        assert_eq!(
+            rebuild_count.load(Ordering::SeqCst),
+            0,
+            "rebuild_chapter must NOT be called by close_chapter (ST7 explicit-only render)"
+        );
+    }
+
+    /// T3b — `rebuild_projection` (explicit call) triggers `rebuild_chapter` on closed chapters.
+    ///
+    /// Verifies that the only path to render is via `rebuild_projection`, consistent
+    /// with Crux #1 (explicit-only render policy).
+    #[test]
+    fn test_explicit_rebuild_projection_dispatches_rebuild_chapter() {
+        let (mut core, _dir) = make_core_for_test();
+
+        let mark_count = Arc::new(AtomicUsize::new(0));
+        let rebuild_count = Arc::new(AtomicUsize::new(0));
+
+        core.add_projection(TestProjection {
+            mark_count: Arc::clone(&mark_count),
+            rebuild_count: Arc::clone(&rebuild_count),
+        });
+
+        // Open, fill required sections, and close a chapter.
+        let id = core
+            .open_chapter("2026-06-14-explicit", "ytk-canonical-v1")
+            .expect("open_chapter should succeed");
+        let sections = ["Verified", "Done", "Decided", "Not Done", "Issues touched"];
+        for &s in &sections {
+            core.append_section(&id, s, "content")
+                .expect("append_section should succeed");
+        }
+        core.close_chapter(&id)
+            .expect("close_chapter should succeed");
+
+        // After close, rebuild_chapter must still be 0 (no auto-dispatch).
+        assert_eq!(
+            rebuild_count.load(Ordering::SeqCst),
+            0,
+            "rebuild_chapter must not be called by close_chapter"
+        );
+
+        // Explicit rebuild_projection must dispatch rebuild_chapter exactly once.
+        core.rebuild_projection("test")
+            .expect("rebuild_projection should succeed");
+
         assert_eq!(
             rebuild_count.load(Ordering::SeqCst),
             1,
-            "rebuild_chapter should be called once after close_chapter"
+            "rebuild_projection should call rebuild_chapter exactly once for the closed chapter"
         );
     }
 
@@ -1132,9 +1153,9 @@ mod tests {
         );
 
         // Open and close a chapter so rebuild_projection has something to process.
+        // ST7: close_chapter does NOT dispatch rebuild_chapter, so baseline == 0.
         open_and_fill(&mut core, "2026-06-14-rebuild", true);
 
-        // Reset rebuild counter from close_chapter dispatch.
         let baseline = rebuild_count.load(Ordering::SeqCst);
 
         core.rebuild_projection(names[0])
