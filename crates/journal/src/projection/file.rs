@@ -403,7 +403,16 @@ impl FileProjection {
                     backup = %bak_path.display(),
                     "external edit detected or first write over existing file; backing up"
                 );
-                std::fs::rename(&self.output_path, &bak_path)?;
+                std::fs::rename(&self.output_path, &bak_path).map_err(|e| {
+                    tracing::warn!(
+                        target: "journal::projection::file",
+                        path = %self.output_path.display(),
+                        backup = %bak_path.display(),
+                        error = %e,
+                        "backup rename failed; aborting write"
+                    );
+                    e
+                })?;
             }
         }
 
