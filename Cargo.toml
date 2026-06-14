@@ -26,3 +26,7 @@ ulid       = "1"
 rust-embed = "8"
 tracing    = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rmcp       = { version = "1.5", features = ["server", "transport-io"] }
+schemars   = "1.2"
+tokio-util = "0"
+tempfile   = "3"

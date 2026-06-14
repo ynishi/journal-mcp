@@ -460,6 +460,50 @@ impl EventLog {
         Ok(ChapterReplay { meta, events })
     }
 
+    /// Return all chapter metadata rows ordered by `opened_at` descending (newest first).
+    ///
+    /// Used by [`JournalCore::tail_chapters`] and [`JournalCore::chapter_ids`] to
+    /// enumerate chapters without scanning individual event streams.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventLogError::Sqlite`] on SQL failure.
+    pub fn all_chapter_metas(&self) -> Result<Vec<ChapterMeta>, EventLogError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT chapter_id, schema_id, current_state, opened_at, closed_at
+               FROM chapter_meta
+              ORDER BY opened_at DESC",
+            )
+            .map_err(|e| {
+                tracing::warn!(error = ?e, "all_chapter_metas: prepare failed");
+                e
+            })?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ChapterMeta {
+                    chapter_id: ChapterId(row.get::<_, String>(0)?),
+                    schema_id: row.get(1)?,
+                    current_state: row.get(2)?,
+                    opened_at: row.get(3)?,
+                    closed_at: row.get(4)?,
+                })
+            })
+            .map_err(|e| {
+                tracing::warn!(error = ?e, "all_chapter_metas: query_map failed");
+                e
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                tracing::warn!(error = ?e, "all_chapter_metas: collecting rows failed");
+                e
+            })?;
+
+        Ok(rows)
+    }
+
     /// Count the number of `section_append` events for a specific section name in a chapter.
     ///
     /// # Arguments

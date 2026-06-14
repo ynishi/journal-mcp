@@ -87,7 +87,7 @@ pub enum ProjectionError {
 ///
 /// This trait is sealed (see the module-level doc).  Only types inside the
 /// `journal` crate may implement it.
-pub trait JournalProjection: private::Sealed {
+pub trait JournalProjection: private::Sealed + Send {
     /// Mark the chapter identified by `id` as requiring a rebuild.
     ///
     /// Called by [`JournalCore::append_section`] after a successful
