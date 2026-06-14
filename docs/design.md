@@ -409,7 +409,7 @@ impl ChapterHandle<Appending> {
 CREATE TABLE event_log (
     event_id     TEXT PRIMARY KEY,        -- ULID
     stream_id    TEXT NOT NULL,           -- chapter_id (date-slug)
-    event_type   TEXT NOT NULL,           -- 'open' / 'section_append' / 'progress_append' / 'close'
+    event_type   TEXT NOT NULL,           -- 'open' / 'section_append' / 'progress_append' / 'close' / 'import'
     section_name TEXT,                    -- section_append 時のみ
     payload      TEXT NOT NULL,           -- JSON
     previous_id  TEXT,                    -- correction chain
@@ -433,6 +433,45 @@ CREATE TRIGGER event_log_no_delete BEFORE DELETE ON event_log
 -- chapter_meta は state transition で UPDATE が走るので trigger なし、
 -- ただし schema_id / opened_at は immutable check を schema 側 transition rule で担保
 ```
+
+#### event_type: import (ST7 昇格、journal_import tool 本実装済)
+
+1 event 内 payload に N chapter を畳む atomic batch wrapper。migration tool (`journal_import`) の EventLog 記録形式。詳細は §13 `journal_import` 昇格の記述を参照。
+
+**Payload form (Option A 確定):**
+
+```json
+{
+  "event_type": "import",
+  "stream_id": "<migration_id (ULID)>",
+  "section_name": null,
+  "payload": {
+    "source_path": "<input file path>",
+    "source_hash": "<sha256 of input file>",
+    "migration_epoch_ms": <unix ms>,
+    "chapters": [
+      {
+        "chapter_id": "<deterministic from name>",
+        "chapter_name": "<h2 literal>",
+        "schema_id": "ytk-canonical-v1",
+        "sections": [
+          { "section_name": "<h3>", "body": "<literal>" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Semantic:**
+
+- 1 SQLite transaction で全 chapter を `closed` state に着地させる
+- `chapter_id` collision は error rollback (skip / overwrite なし)
+- 日常的な章追加は `journal_open_chapter` + `journal_append_section` + `journal_close_chapter` の連打で対応。`import` は migration 系用途に限定 (§13 参照)
+
+**Replay 経路:**
+
+既存の `replay_chapter` / `replay_until` は `import` event の payload を `chapter_open + section_append × N + chapter_close` 相当の virtual events 列に展開して処理する。ProjectionError / EventLog の replay API は `import` を透過的に扱う。
 
 ### 8.2 FileProjection
 
@@ -540,9 +579,18 @@ render template は active schema の `render.file_projection` から取得し�
 
 - mini-app issue / Outline book SoT の置き換えは行わない (役割分担維持: issue=枝、 journal=幹、 outline=ナレッジ tree)
 - multi-user collab (concurrent append) は first cut goal 外、 single-writer 前提
-- 既存 `workspace/journal.md` からの migration tool (必要時は EventLog の `event_type='import'` で過去章一括 append で対応)
+- 既存 `workspace/journal.md` からの migration tool — **ST7 で昇格、journal_import tool 本実装済 (16 本目 MCP tool として登録、Option A 確定形)**。詳細は §8.1 `import` event_type 参照
 - vector search (sqlite-vec / embedding) (将来 Projection の 1 つとして `VectorProjection` 追加可能)
 - schema inheritance / overlay (Step 7、 first cut は単独 schema のみ)
 - **Cross-platform Windows file IO**: first cut は POSIX (atomic rename) のみ対応。 Windows での代替 (file lock + copy 等) は別 issue
 - **FTS5 / 全文検索 backend**: `journal_grep` は first cut で SQL `LIKE` ベース、 FTS5 移行は別 issue
+
+### Dogfood Reset SOP (workspace/journal.md を消した後の復旧手順)
+
+1. **事前確認**: `.journal.db` が存在する場合、DB が空 (章 0 件) であることを確認する。`import` は idempotent ではないため (chapter_id collision で error rollback)、既存 DB に章が残っているとエラーになる
+2. **DB 削除**: `workspace/.journal.db` を削除する (空 DB に初期化するため)
+3. **import 実行**: 元の markdown ファイル (version-controlled copy or backup) を `journal_import(path="<backup_journal.md>")` で取り込む
+4. **projection 再生成**: `journal_projection_rebuild(name="file")` を明示呼び出して `workspace/journal.md` を再生成する
+
+> **注意**: `import` は章の一括取り込みに使用する。日常的な章の追記には `journal_open_chapter` / `journal_append_section` / `journal_close_chapter` を使うこと。
 
