@@ -150,6 +150,18 @@ pub struct JournalProjectionRebuildParams {
 }
 
 // ---------------------------------------------------------------------------
+// ST7 parameter structs — import tool
+// ---------------------------------------------------------------------------
+
+/// Parameters for `journal_import`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalImportParams {
+    /// Filesystem path of the markdown file to import (absolute or relative to
+    /// `JOURNAL_PROJECT_ROOT`).
+    pub path: String,
+}
+
+// ---------------------------------------------------------------------------
 // Local output structs (not in the journal crate, MCP-layer only)
 // ---------------------------------------------------------------------------
 
@@ -184,7 +196,7 @@ struct ChapterListRow {
 ///
 /// # Crux invariants satisfied here
 ///
-/// * **Crux #1** (tool_router 一元 ServerHandler 配線): all 15 tools (ST6-1/ST6-2/ST6-3)
+/// * **Crux #1** (tool_router 一元 ServerHandler 配線): all 16 tools (ST6-1/ST6-2/ST6-3/ST7)
 ///   are registered in a single `#[tool_router] impl JournalMcpServer` block and
 ///   dispatched through `#[tool_handler] impl ServerHandler`.
 /// * **Crux #3** (stdio transport 固定配線): `main()` wires
@@ -738,7 +750,7 @@ impl JournalMcpServer {
 
     // -----------------------------------------------------------------------
     // Subtask 3: remaining 5 tools — open_chapters / progress_of / projection 3
-    // Crux #1 final: all 15 tools are in this single #[tool_router] block.
+    // ST7 adds journal_import as the 16th tool — all in this single #[tool_router] block.
     // -----------------------------------------------------------------------
 
     /// List all chapters that are still open (closed_at IS NULL).
@@ -917,6 +929,46 @@ impl JournalMcpServer {
         } // guard drops here — no await across the Mutex
         Ok(format!("projection '{}' rebuilt", params.name))
     }
+
+    /// Import chapters from an existing markdown file into the journal.
+    ///
+    /// Parses the file using ytk-canonical-v1 rules (h2=chapter, h3=section),
+    /// inserts all chapters in one atomic SQLite transaction, and returns a JSON
+    /// array of the chapter IDs that were imported.
+    ///
+    /// If any `chapter_id` already exists the entire batch is rolled back and an
+    /// error is returned (no partial state).  Projection rebuild is **not**
+    /// triggered automatically — invoke `journal_projection_rebuild` explicitly
+    /// after import if rendering is needed (Crux #1 explicit-only render policy).
+    #[tool(
+        name = "journal_import",
+        description = "Import chapters from a markdown file (ytk-canonical-v1: h2=chapter, h3=section). \
+                       Atomic batch insert — any chapter_id collision rolls back the entire batch. \
+                       Returns JSON array of imported chapter IDs. \
+                       Does NOT trigger projection rebuild (call journal_projection_rebuild explicitly).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn journal_import(
+        &self,
+        Parameters(params): Parameters<JournalImportParams>,
+    ) -> Result<String, String> {
+        let imported = {
+            // SAFETY: see journal_open_chapter
+            let mut core = self.core.lock().unwrap();
+            let path = std::path::PathBuf::from(&params.path);
+            core.import_chapter(&path).map_err(|e| {
+                tracing::warn!(error = ?e, path = %params.path, "journal_import failed");
+                e.to_string()
+            })?
+        }; // guard drops here — no await across the Mutex
+        let ids: Vec<&str> = imported.iter().map(|id| id.0.as_str()).collect();
+        Ok(serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,20 +1127,20 @@ mod tests {
         assert!(workspace.exists(), "workspace should be created by new()");
     }
 
-    /// T3 (error path) — tool_router now returns exactly 15 tools after ST3.
+    /// T3 (error path) — tool_router now returns exactly 16 tools after ST7.
     ///
-    /// Updated from "exactly 10 tools" in ST2 to "exactly 15 tools" in ST3
-    /// (4 lifecycle + 3 schema + 3 read + 5 projection/open_chapters/progress tools).
+    /// Updated from "exactly 15 tools" (ST3/ST6) to "exactly 16 tools" (ST7)
+    /// by adding `journal_import` as the 16th tool.
     ///
-    /// Verifies Crux #1: all 15 tools are wired into the single `#[tool_router]` block.
+    /// Verifies Crux #1: all 16 tools are wired into the single `#[tool_router]` block.
     #[test]
-    fn test_subtask3_exactly_fifteen_tools() {
+    fn test_st7_exactly_sixteen_tools() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
         let server = make_server(&tmp);
         let count = server.tool_router.list_all().len();
         assert_eq!(
-            count, 15,
-            "ST3 tool_router should have exactly 15 tools (Crux #1), got {count}"
+            count, 16,
+            "ST7 tool_router should have exactly 16 tools (Crux #1), got {count}"
         );
     }
 
@@ -1195,11 +1247,11 @@ mod tests {
     // ST3 integration tests — Crux #1 final: 15 tool full registration assert
     // -----------------------------------------------------------------------
 
-    /// Canonical spelling of all 15 MCP tools in the tool_router.
+    /// Canonical spelling of all 16 MCP tools in the tool_router (ST7 final).
     ///
     /// This constant is the authoritative list.  Changing this list is a
     /// Crux #1 or Crux #2 violation and requires human review.
-    const ALL_FIFTEEN_TOOLS: &[&str] = &[
+    const EXPECTED_TOOLS: &[&str] = &[
         // ST1: chapter lifecycle (4)
         "journal_open_chapter",
         "journal_append_section",
@@ -1219,24 +1271,26 @@ mod tests {
         "journal_projection_attach",
         "journal_projection_detach",
         "journal_projection_rebuild",
+        // ST7: import tool (1)
+        "journal_import",
     ];
 
-    /// T1 (property) — Crux #1 final: all 15 tools are registered in the
+    /// T1 (property) — Crux #1 final: all 16 tools are registered in the
     /// single `#[tool_router] impl JournalMcpServer` block.
     ///
-    /// This is the primary acceptance test for ST6 as a whole.
+    /// This is the primary acceptance test for ST7 as a whole.
     #[test]
-    fn test_all_fifteen_tools_registered() {
+    fn test_all_sixteen_tools_registered() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
         let server = make_server(&tmp);
         let tools = server.tool_router.list_all();
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert_eq!(
             tool_names.len(),
-            15,
-            "exactly 15 tools must be registered (Crux #1); got: {tool_names:?}"
+            16,
+            "exactly 16 tools must be registered (Crux #1 ST7); got: {tool_names:?}"
         );
-        for &name in ALL_FIFTEEN_TOOLS {
+        for &name in EXPECTED_TOOLS {
             assert!(
                 tool_names.contains(&name),
                 "tool '{name}' must be registered (Crux #1); registered: {tool_names:?}"
