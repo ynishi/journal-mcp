@@ -717,6 +717,51 @@ impl JournalCore {
     }
 
     // -----------------------------------------------------------------------
+    // Schema registry facade (ST6-2)
+    // -----------------------------------------------------------------------
+
+    /// Load a YAML schema literal into the SchemaRegistry L2 layer.
+    ///
+    /// This is a facade over [`SchemaRegistry::load_from_yaml_str`] that avoids
+    /// exposing the private `registry` field.  The returned value is the
+    /// registry key that was inserted (e.g. `"ytk-canonical-v1"`).
+    ///
+    /// # Arguments
+    ///
+    /// * `yaml` — a YAML string conforming to the `ChapterSchema` format
+    ///   (see `docs/design.md §5`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`JournalError::Registry`] when the YAML fails to parse.
+    pub fn load_schema_yaml(&mut self, yaml: &str) -> Result<String, JournalError> {
+        Ok(self.registry.load_from_yaml_str(yaml)?)
+    }
+
+    /// Return all registry keys visible from this core (L1 built-in ∪ L2 project-local).
+    ///
+    /// The returned `Vec<String>` is owned (converted from `Vec<&str>` returned
+    /// by [`SchemaRegistry::list`]).
+    pub fn schema_keys(&self) -> Vec<String> {
+        self.registry
+            .list()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Look up a [`ChapterSchema`] by registry key.
+    ///
+    /// Returns `None` when the key is absent from both the L1 and L2 layers.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` — registry key (e.g. `"ytk-canonical-v1"`).
+    pub fn schema_spec(&self, key: &str) -> Option<&crate::ChapterSchema> {
+        self.registry.get(key)
+    }
+
+    // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 

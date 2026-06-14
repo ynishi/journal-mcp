@@ -150,6 +150,42 @@ impl SchemaRegistry {
         keys.into_keys().collect()
     }
 
+    /// Load a [`ChapterSchema`] from a YAML literal string into the L2 layer.
+    ///
+    /// Parses the YAML, derives the registry key (`"<schema_id>-v<version>"`),
+    /// and inserts the schema into L2.  If a schema with the same key already
+    /// exists in L2 it is **overwritten** (idempotent — same YAML produces the
+    /// same key and value, so repeated calls are safe).
+    ///
+    /// # Arguments
+    ///
+    /// * `yaml` — a YAML string conforming to the `ChapterSchema` format (see
+    ///   `docs/design.md §5`).
+    ///
+    /// # Returns
+    ///
+    /// The registry key that was inserted (e.g. `"ytk-canonical-v1"`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::ProjectLocalLoad`] (with `path = "<runtime>"`)
+    /// when the YAML cannot be parsed as a valid `ChapterSchema`.
+    pub fn load_from_yaml_str(&mut self, yaml: &str) -> Result<String, RegistryError> {
+        let schema = ChapterSchema::parse_str(yaml).map_err(|e| {
+            tracing::warn!(error = ?e, "load_from_yaml_str: parse failed");
+            RegistryError::ProjectLocalLoad {
+                path: "<runtime>".to_string(),
+                source: e,
+            }
+        })?;
+        let key = format!("{}-v{}", schema.schema_id(), schema.version());
+        let overwritten = self.l2.insert(key.clone(), schema).is_some();
+        if overwritten {
+            tracing::info!(key = %key, "load_from_yaml_str: existing key overwritten (idempotent)");
+        }
+        Ok(key)
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
