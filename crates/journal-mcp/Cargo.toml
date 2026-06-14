@@ -21,3 +21,9 @@ thiserror  = { workspace = true }
 tokio      = { workspace = true }
 tracing    = { workspace = true }
 tracing-subscriber = { workspace = true }
+rmcp       = { workspace = true }
+schemars   = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+tempfile   = { workspace = true }

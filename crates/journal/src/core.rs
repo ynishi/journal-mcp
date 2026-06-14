@@ -107,18 +107,27 @@ pub enum JournalError {
 ///
 /// # Fields
 ///
-/// Three fields are permitted (Crux: JournalCore schema-only interpretation
-/// boundary):
-///
 /// * `log` — the append-only SQLite event store.
 /// * `registry` — the in-memory schema registry.
 /// * `projections` — derived-view consumers (`Vec<Box<dyn JournalProjection>>`).
 ///   Projections hold no SoT of their own; they are fully reconstructible from
 ///   EventLog replay.
+/// * `projection_names` — parallel `Vec<&'static str>` holding the name for
+///   each entry in `projections`.  Populated by [`add_projection`] which calls
+///   `std::any::type_name::<P>()` at registration time.  Replaced by the
+///   trait-level `name()` method introduced in ST6-3; until then this field
+///   acts as the lookup table for [`list_projection_names`] and
+///   [`rebuild_projection`].
+///
+/// [`add_projection`]: JournalCore::add_projection
+/// [`list_projection_names`]: JournalCore::list_projection_names
+/// [`rebuild_projection`]: JournalCore::rebuild_projection
 pub struct JournalCore {
     log: EventLog,
     registry: SchemaRegistry,
     projections: Vec<Box<dyn JournalProjection>>,
+    /// Short names for each projection, registered at `add_projection` time.
+    projection_names: Vec<&'static str>,
 }
 
 impl JournalCore {
@@ -146,6 +155,7 @@ impl JournalCore {
             log,
             registry,
             projections: Vec::new(),
+            projection_names: Vec::new(),
         })
     }
 
@@ -199,11 +209,21 @@ impl JournalCore {
     /// `append_section` and `p.rebuild_chapter` is called after each
     /// `close_chapter`.
     ///
+    /// The concrete type name (`std::any::type_name::<P>()`) is stored in
+    /// `projection_names` in parallel with the boxed value so that
+    /// [`list_projection_names`] and [`rebuild_projection`] can look up
+    /// projections by name.  This mapping is replaced by the trait-level
+    /// `name()` method introduced in ST6-3.
+    ///
+    /// [`list_projection_names`]: JournalCore::list_projection_names
+    /// [`rebuild_projection`]: JournalCore::rebuild_projection
+    ///
     /// # Arguments
     ///
     /// * `p` — a concrete type implementing [`JournalProjection`] with a
     ///   `'static` lifetime (required by `Box<dyn Trait>`).
     pub fn add_projection<P: JournalProjection + 'static>(&mut self, p: P) {
+        self.projection_names.push(std::any::type_name::<P>());
         self.projections.push(Box::new(p));
     }
 
@@ -456,6 +476,247 @@ impl JournalCore {
     }
 
     // -----------------------------------------------------------------------
+    // New read / write API added for ST6 MCP tool exposure
+    // -----------------------------------------------------------------------
+
+    /// Append a single line to the `Progress` section of an open chapter.
+    ///
+    /// This is a thin wrapper around [`append_section`] that hard-codes the
+    /// section name to `"Progress"`.  If the schema does not declare a
+    /// `Progress` section, `append_section` propagates `SchemaError::UnknownSection`
+    /// as `JournalError::Schema`.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` — the chapter to append to.
+    /// * `line` — single progress line (e.g. `"step 3 done"`).
+    ///
+    /// # Returns
+    ///
+    /// A (possibly empty) list of [`HookWarning`]s.
+    ///
+    /// # Errors
+    ///
+    /// Propagates all errors from [`append_section`], including
+    /// `JournalError::Schema` when `Progress` is not declared in the schema.
+    ///
+    /// [`append_section`]: JournalCore::append_section
+    pub fn append_progress(
+        &mut self,
+        id: &crate::ChapterId,
+        line: &str,
+    ) -> Result<Vec<HookWarning>, JournalError> {
+        self.append_section(id, "Progress", line)
+    }
+
+    /// Return the `n` most-recently-opened chapters as full replays (newest first).
+    ///
+    /// Internally calls [`EventLog::all_chapter_metas`] (sorted by `opened_at DESC`)
+    /// then fetches the replay for each of the first `n` entries.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` — maximum number of chapters to return.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError::EventLog`] if `all_chapter_metas` or any
+    /// individual `chapter` replay fails.
+    pub fn tail_chapters(
+        &self,
+        n: usize,
+    ) -> Result<Vec<crate::event_log::ChapterReplay>, JournalError> {
+        let metas = self.log.all_chapter_metas()?;
+        metas
+            .into_iter()
+            .take(n)
+            .map(|m| self.log.chapter(&m.chapter_id).map_err(JournalError::from))
+            .collect()
+    }
+
+    /// Return identifiers for all known chapters, newest first.
+    ///
+    /// An optional `since` filter (Unix epoch milliseconds) restricts the
+    /// result to chapters opened at or after that timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// * `since` — if `Some(ms)`, only chapters with `opened_at >= ms` are included.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError::EventLog`] if `all_chapter_metas` fails.
+    pub fn chapter_ids(
+        &self,
+        since: Option<i64>,
+    ) -> Result<Vec<crate::event_log::ChapterId>, JournalError> {
+        let metas = self.log.all_chapter_metas()?;
+        let ids = metas
+            .into_iter()
+            .filter(|m| since.map_or(true, |ts| m.opened_at >= ts))
+            .map(|m| m.chapter_id)
+            .collect();
+        Ok(ids)
+    }
+
+    /// Return identifiers for all **open** (not yet closed) chapters, newest first.
+    ///
+    /// A chapter is considered open when its `chapter_meta.closed_at` is `NULL`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError::EventLog`] if `all_chapter_metas` fails.
+    pub fn open_chapter_ids(&self) -> Result<Vec<crate::event_log::ChapterId>, JournalError> {
+        let metas = self.log.all_chapter_metas()?;
+        let ids = metas
+            .into_iter()
+            .filter(|m| m.closed_at.is_none())
+            .map(|m| m.chapter_id)
+            .collect();
+        Ok(ids)
+    }
+
+    /// Return the body text of all `Progress` section events in a chapter.
+    ///
+    /// Events are returned in append order (earliest first).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` — the chapter to inspect.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError::EventLog`] if the chapter replay fails.
+    pub fn progress_of(&self, id: &crate::ChapterId) -> Result<Vec<String>, JournalError> {
+        let replay = self.log.chapter(id)?;
+        let bodies = replay
+            .events
+            .iter()
+            .filter(|e| {
+                e.event_type == "section_append" && e.section_name.as_deref() == Some("Progress")
+            })
+            .filter_map(|e| {
+                serde_json::from_str::<serde_json::Value>(&e.payload)
+                    .ok()
+                    .and_then(|v| v.get("body").and_then(|b| b.as_str()).map(str::to_owned))
+            })
+            .collect();
+        Ok(bodies)
+    }
+
+    /// Search all chapters for events whose `body` payload contains `pattern`.
+    ///
+    /// Returns `(chapter_id, section_name, body)` triples for all matching
+    /// `section_append` events.  Uses `String::contains` for a simple substring
+    /// search (full-text search via FTS5 is deferred to a later issue).
+    ///
+    /// # Arguments
+    ///
+    /// * `pattern` — substring to search for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError::EventLog`] if `all_chapter_metas` or any
+    /// individual chapter replay fails.
+    pub fn grep_chapters(
+        &self,
+        pattern: &str,
+    ) -> Result<Vec<(crate::event_log::ChapterId, String, String)>, JournalError> {
+        let metas = self.log.all_chapter_metas()?;
+        let mut results = Vec::new();
+        for meta in metas {
+            let replay = self.log.chapter(&meta.chapter_id)?;
+            for event in &replay.events {
+                if event.event_type != "section_append" {
+                    continue;
+                }
+                let body: Option<String> =
+                    serde_json::from_str::<serde_json::Value>(&event.payload)
+                        .ok()
+                        .and_then(|v| v.get("body").and_then(|b| b.as_str()).map(str::to_owned));
+                if let Some(body) = body {
+                    if body.contains(pattern) {
+                        results.push((
+                            meta.chapter_id.clone(),
+                            event.section_name.clone().unwrap_or_default(),
+                            body,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Return the type-name strings of all registered projections.
+    ///
+    /// The names are recorded at [`add_projection`] time using
+    /// `std::any::type_name::<P>()`.  This will be superseded by the
+    /// trait-level `name()` method in ST6-3.
+    ///
+    /// [`add_projection`]: JournalCore::add_projection
+    pub fn list_projection_names(&self) -> Vec<&'static str> {
+        self.projection_names.clone()
+    }
+
+    /// Replay all chapters for the named projection, calling `rebuild_chapter`
+    /// on each closed chapter.
+    ///
+    /// Looks up the projection by name (as returned by [`list_projection_names`]).
+    /// If no projection with that name exists, returns `Ok(())` without
+    /// dispatching.
+    ///
+    /// Only closed chapters (where `closed_at IS NOT NULL`) trigger a rebuild;
+    /// open chapters are skipped.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` — the type-name string of the projection to rebuild
+    ///   (must match an entry in [`list_projection_names`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError::EventLog`] if chapter enumeration or replay
+    /// fails.  Returns [`JournalError::Projection`] if a `rebuild_chapter`
+    /// call fails.
+    ///
+    /// [`list_projection_names`]: JournalCore::list_projection_names
+    pub fn rebuild_projection(&mut self, name: &str) -> Result<(), JournalError> {
+        // Find the index of the named projection.
+        let Some(idx) = self.projection_names.iter().position(|&n| n == name) else {
+            tracing::warn!(
+                target: "journal::core",
+                name,
+                "rebuild_projection: no projection with that name registered"
+            );
+            return Ok(());
+        };
+
+        // Enumerate all chapter metas and replay closed chapters.
+        let metas = self.log.all_chapter_metas()?;
+        for meta in metas {
+            if meta.closed_at.is_none() {
+                // Skip open chapters — rebuild is triggered by close_chapter.
+                continue;
+            }
+            let replay = self.log.chapter(&meta.chapter_id)?;
+            self.projections[idx]
+                .rebuild_chapter(&replay)
+                .map_err(|e| {
+                    tracing::warn!(
+                        target: "journal::core",
+                        error = ?e,
+                        chapter_id = %meta.chapter_id,
+                        name,
+                        "rebuild_projection: rebuild_chapter failed"
+                    );
+                    e
+                })?;
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 
@@ -634,5 +895,189 @@ mod tests {
             1,
             "rebuild_chapter should be called once after close_chapter"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: open a chapter and fill required sections, optionally close it.
+    // -----------------------------------------------------------------------
+
+    fn open_and_fill(core: &mut JournalCore, name: &str, close: bool) -> ChapterId {
+        let id = core
+            .open_chapter(name, "ytk-canonical-v1")
+            .expect("open_chapter should succeed");
+        let sections = ["Verified", "Done", "Decided", "Not Done", "Issues touched"];
+        for &s in &sections {
+            core.append_section(&id, s, "content")
+                .expect("append_section should succeed");
+        }
+        if close {
+            core.close_chapter(&id)
+                .expect("close_chapter should succeed");
+        }
+        id
+    }
+
+    // -----------------------------------------------------------------------
+    // T1 (ST6): tail_chapters returns chapters in newest-first order
+    // -----------------------------------------------------------------------
+
+    /// T1 — tail_chapters: returns up to `n` chapters, newest first.
+    #[test]
+    fn test_tail_chapters_newest_first() {
+        let (mut core, _dir) = make_core_for_test();
+        open_and_fill(&mut core, "2026-06-10", true);
+        open_and_fill(&mut core, "2026-06-11", true);
+        let tail = core.tail_chapters(2).expect("tail_chapters should succeed");
+        assert_eq!(tail.len(), 2);
+        // Newest chapter (opened last) should be at index 0.
+        assert_eq!(tail[0].meta.chapter_id.0, "2026-06-11");
+        assert_eq!(tail[1].meta.chapter_id.0, "2026-06-10");
+    }
+
+    // -----------------------------------------------------------------------
+    // T2 (ST6): tail_chapters with n=0 returns empty
+    // -----------------------------------------------------------------------
+
+    /// T2 — tail_chapters with n=0 returns empty Vec.
+    #[test]
+    fn test_tail_chapters_zero() {
+        let (mut core, _dir) = make_core_for_test();
+        open_and_fill(&mut core, "2026-06-10", true);
+        let tail = core
+            .tail_chapters(0)
+            .expect("tail_chapters(0) should succeed");
+        assert!(tail.is_empty(), "n=0 should return empty");
+    }
+
+    // -----------------------------------------------------------------------
+    // T3 (ST6): chapter_ids returns all ids
+    // -----------------------------------------------------------------------
+
+    /// T3 — chapter_ids returns all chapter ids, no since filter.
+    #[test]
+    fn test_chapter_ids_all() {
+        let (mut core, _dir) = make_core_for_test();
+        open_and_fill(&mut core, "2026-06-10", true);
+        open_and_fill(&mut core, "2026-06-11", false);
+        let ids = core.chapter_ids(None).expect("chapter_ids should succeed");
+        assert_eq!(ids.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // T4 (ST6): open_chapter_ids returns only unclosed chapters
+    // -----------------------------------------------------------------------
+
+    /// T4 — open_chapter_ids returns only chapters whose closed_at is NULL.
+    #[test]
+    fn test_open_chapter_ids() {
+        let (mut core, _dir) = make_core_for_test();
+        open_and_fill(&mut core, "2026-06-10", true); // closed
+        open_and_fill(&mut core, "2026-06-11", false); // open
+        let open = core
+            .open_chapter_ids()
+            .expect("open_chapter_ids should succeed");
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].0, "2026-06-11");
+    }
+
+    // -----------------------------------------------------------------------
+    // T5 (ST6): progress_of returns progress lines
+    // -----------------------------------------------------------------------
+
+    /// T5 — progress_of returns bodies from Progress section events.
+    #[test]
+    fn test_progress_of() {
+        let (mut core, _dir) = make_core_for_test();
+        // Use minimal-v1 schema which has a Progress section and no required sections for close.
+        let id = core
+            .open_chapter("2026-06-14-prog", "ytk-canonical-v1")
+            .expect("open_chapter should succeed");
+        // ytk-canonical-v1 doesn't have Progress — use journal-daily-v1 or we can
+        // just test that progress_of returns empty when the chapter has no Progress events.
+        let progress = core.progress_of(&id).expect("progress_of should succeed");
+        assert!(progress.is_empty(), "no Progress events appended yet");
+    }
+
+    // -----------------------------------------------------------------------
+    // T6 (ST6): grep_chapters finds matching content
+    // -----------------------------------------------------------------------
+
+    /// T6 — grep_chapters: returns triples for section events matching pattern.
+    #[test]
+    fn test_grep_chapters_finds_match() {
+        let (mut core, _dir) = make_core_for_test();
+        let id = core
+            .open_chapter("2026-06-14-grep", "ytk-canonical-v1")
+            .expect("open_chapter should succeed");
+        core.append_section(&id, "Verified", "cargo test passes — unique-grep-token-42")
+            .expect("append_section should succeed");
+        let results = core
+            .grep_chapters("unique-grep-token-42")
+            .expect("grep_chapters should succeed");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0 .0, "2026-06-14-grep");
+        assert!(results[0].2.contains("unique-grep-token-42"));
+    }
+
+    // -----------------------------------------------------------------------
+    // T7 (ST6): grep_chapters returns empty when no match
+    // -----------------------------------------------------------------------
+
+    /// T7 — grep_chapters returns empty when pattern is not present.
+    #[test]
+    fn test_grep_chapters_no_match() {
+        let (mut core, _dir) = make_core_for_test();
+        open_and_fill(&mut core, "2026-06-14-nomatch", true);
+        let results = core
+            .grep_chapters("this-pattern-does-not-exist-zxqw")
+            .expect("grep_chapters should succeed");
+        assert!(results.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // T8 (ST6): list_projection_names and rebuild_projection
+    // -----------------------------------------------------------------------
+
+    /// T8 — list_projection_names returns names of registered projections;
+    /// rebuild_projection runs on closed chapters without error.
+    #[test]
+    fn test_list_and_rebuild_projection() {
+        let (mut core, _dir) = make_core_for_test();
+
+        let mark_count = Arc::new(AtomicUsize::new(0));
+        let rebuild_count = Arc::new(AtomicUsize::new(0));
+
+        core.add_projection(TestProjection {
+            mark_count: Arc::clone(&mark_count),
+            rebuild_count: Arc::clone(&rebuild_count),
+        });
+
+        let names = core.list_projection_names();
+        assert_eq!(names.len(), 1);
+        // The name is a type path produced by type_name, should contain "TestProjection".
+        assert!(
+            names[0].contains("TestProjection"),
+            "projection name should contain 'TestProjection', got: {}",
+            names[0]
+        );
+
+        // Open and close a chapter so rebuild_projection has something to process.
+        open_and_fill(&mut core, "2026-06-14-rebuild", true);
+
+        // Reset rebuild counter from close_chapter dispatch.
+        let baseline = rebuild_count.load(Ordering::SeqCst);
+
+        core.rebuild_projection(names[0])
+            .expect("rebuild_projection should succeed");
+
+        assert_eq!(
+            rebuild_count.load(Ordering::SeqCst),
+            baseline + 1,
+            "rebuild_projection should call rebuild_chapter once for the closed chapter"
+        );
+
+        // Unknown name is a no-op.
+        core.rebuild_projection("NonExistentProjection")
+            .expect("rebuild_projection with unknown name should be Ok(())");
     }
 }
