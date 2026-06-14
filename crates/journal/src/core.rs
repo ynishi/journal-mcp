@@ -93,6 +93,24 @@ pub enum JournalError {
         /// The section whose body is empty.
         section: String,
     },
+
+    /// No projection with the given name is registered with this `JournalCore`.
+    ///
+    /// Returned by `journal_projection_rebuild` when the caller specifies a
+    /// projection name that has not been registered via `add_projection`.
+    #[error("projection not found: {name}")]
+    ProjectionNotFound {
+        /// The projection name that was requested but not found.
+        name: String,
+    },
+
+    /// Detaching a projection is not yet supported in this release.
+    ///
+    /// Planned for ST7 (see `docs/design.md §10 Step 7`).  The MCP tool entry
+    /// for `journal_projection_detach` is registered (Crux #1) but always
+    /// returns this error.
+    #[error("projection detach is not yet supported (see docs/design.md §10 Step 7)")]
+    ProjectionDetachUnsupported,
 }
 
 // ---------------------------------------------------------------------------
@@ -114,10 +132,8 @@ pub enum JournalError {
 ///   EventLog replay.
 /// * `projection_names` — parallel `Vec<&'static str>` holding the name for
 ///   each entry in `projections`.  Populated by [`add_projection`] which calls
-///   `std::any::type_name::<P>()` at registration time.  Replaced by the
-///   trait-level `name()` method introduced in ST6-3; until then this field
-///   acts as the lookup table for [`list_projection_names`] and
-///   [`rebuild_projection`].
+///   [`JournalProjection::name`] at registration time.  Acts as the lookup
+///   table for [`list_projection_names`] and [`rebuild_projection`].
 ///
 /// [`add_projection`]: JournalCore::add_projection
 /// [`list_projection_names`]: JournalCore::list_projection_names
@@ -209,11 +225,10 @@ impl JournalCore {
     /// `append_section` and `p.rebuild_chapter` is called after each
     /// `close_chapter`.
     ///
-    /// The concrete type name (`std::any::type_name::<P>()`) is stored in
+    /// The stable name provided by [`JournalProjection::name`] is stored in
     /// `projection_names` in parallel with the boxed value so that
     /// [`list_projection_names`] and [`rebuild_projection`] can look up
-    /// projections by name.  This mapping is replaced by the trait-level
-    /// `name()` method introduced in ST6-3.
+    /// projections by name.
     ///
     /// [`list_projection_names`]: JournalCore::list_projection_names
     /// [`rebuild_projection`]: JournalCore::rebuild_projection
@@ -223,7 +238,7 @@ impl JournalCore {
     /// * `p` — a concrete type implementing [`JournalProjection`] with a
     ///   `'static` lifetime (required by `Box<dyn Trait>`).
     pub fn add_projection<P: JournalProjection + 'static>(&mut self, p: P) {
-        self.projection_names.push(std::any::type_name::<P>());
+        self.projection_names.push(p.name());
         self.projections.push(Box::new(p));
     }
 
@@ -648,13 +663,18 @@ impl JournalCore {
         Ok(results)
     }
 
-    /// Return the type-name strings of all registered projections.
+    /// Return the stable name strings of all registered projections.
     ///
     /// The names are recorded at [`add_projection`] time using
-    /// `std::any::type_name::<P>()`.  This will be superseded by the
-    /// trait-level `name()` method in ST6-3.
+    /// [`JournalProjection::name`].  For example, [`FileProjection`] returns
+    /// `"file"`.
+    ///
+    /// # Returns
+    ///
+    /// An owned `Vec<&'static str>` of projection name strings in registration order.
     ///
     /// [`add_projection`]: JournalCore::add_projection
+    /// [`FileProjection`]: crate::FileProjection
     pub fn list_projection_names(&self) -> Vec<&'static str> {
         self.projection_names.clone()
     }
@@ -866,6 +886,10 @@ mod tests {
     impl private::Sealed for TestProjection {}
 
     impl JournalProjection for TestProjection {
+        fn name(&self) -> &'static str {
+            "test"
+        }
+
         fn mark_dirty(&mut self, _id: &ChapterId) -> Result<(), ProjectionError> {
             self.mark_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -1099,10 +1123,11 @@ mod tests {
 
         let names = core.list_projection_names();
         assert_eq!(names.len(), 1);
-        // The name is a type path produced by type_name, should contain "TestProjection".
-        assert!(
-            names[0].contains("TestProjection"),
-            "projection name should contain 'TestProjection', got: {}",
+        // The name is now provided by JournalProjection::name() (ST6-3: trait-level name).
+        // TestProjection::name() returns "test".
+        assert_eq!(
+            names[0], "test",
+            "projection name should be the trait name() return value, got: {}",
             names[0]
         );
 

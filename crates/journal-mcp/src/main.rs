@@ -114,6 +114,42 @@ pub struct JournalGrepParams {
 pub struct JournalChapterListParams {}
 
 // ---------------------------------------------------------------------------
+// Subtask-3 parameter structs — open_chapters / progress_of / projection 3
+// ---------------------------------------------------------------------------
+
+/// Parameters for `journal_open_chapters` (no fields — lists all open chapters).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalOpenChaptersParams {}
+
+/// Parameters for `journal_progress_of`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalProgressOfParams {
+    /// Target chapter ID whose Progress section events to return.
+    pub chapter_id: String,
+}
+
+/// Parameters for `journal_projection_attach`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalProjectionAttachParams {
+    /// Stable name of the projection to attach (e.g. `"file"`).
+    pub name: String,
+}
+
+/// Parameters for `journal_projection_detach`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalProjectionDetachParams {
+    /// Stable name of the projection to detach (e.g. `"file"`).
+    pub name: String,
+}
+
+/// Parameters for `journal_projection_rebuild`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalProjectionRebuildParams {
+    /// Stable name of the projection to rebuild (e.g. `"file"`).
+    pub name: String,
+}
+
+// ---------------------------------------------------------------------------
 // Local output structs (not in the journal crate, MCP-layer only)
 // ---------------------------------------------------------------------------
 
@@ -699,6 +735,188 @@ impl JournalMcpServer {
             serde_json::to_string(&rows).expect("Vec<ChapterListRow> serialises without error");
         Ok(json)
     }
+
+    // -----------------------------------------------------------------------
+    // Subtask 3: remaining 5 tools — open_chapters / progress_of / projection 3
+    // Crux #1 final: all 15 tools are in this single #[tool_router] block.
+    // -----------------------------------------------------------------------
+
+    /// List all chapters that are still open (closed_at IS NULL).
+    ///
+    /// Returns a JSON array of chapter ID strings for chapters that have not
+    /// yet been closed.  Useful for resuming work on unfinished entries.
+    #[tool(
+        name = "journal_open_chapters",
+        description = "List all chapters that are still open (closed_at IS NULL). \
+                       Returns a JSON array of chapter ID strings.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn journal_open_chapters(
+        &self,
+        _params: Parameters<JournalOpenChaptersParams>,
+    ) -> Result<String, String> {
+        let ids = {
+            // SAFETY: see journal_open_chapter
+            let core = self.core.lock().unwrap();
+            core.open_chapter_ids().map_err(|e| {
+                tracing::warn!(error = ?e, "journal_open_chapters failed");
+                e.to_string()
+            })?
+        }; // guard drops here
+        let id_strs: Vec<String> = ids.into_iter().map(|id| id.0).collect();
+        // SAFETY: Vec<String> serialisation is infallible.
+        let json =
+            serde_json::to_string(&id_strs).expect("Vec<String> serialises to JSON without error");
+        Ok(json)
+    }
+
+    /// Read all body lines from the `Progress` section of a specific chapter.
+    ///
+    /// Returns a JSON array of progress body strings in append order
+    /// (earliest first).  Returns an empty array when no Progress entries exist.
+    #[tool(
+        name = "journal_progress_of",
+        description = "Read the Progress section of a specific chapter. \
+                       Returns a JSON array of progress body strings in append order.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn journal_progress_of(
+        &self,
+        Parameters(params): Parameters<JournalProgressOfParams>,
+    ) -> Result<String, String> {
+        let chapter_id = journal::ChapterId(params.chapter_id);
+        let entries = {
+            // SAFETY: see journal_open_chapter
+            let core = self.core.lock().unwrap();
+            core.progress_of(&chapter_id).map_err(|e| {
+                tracing::warn!(error = ?e, chapter_id = %chapter_id, "journal_progress_of failed");
+                e.to_string()
+            })?
+        }; // guard drops here
+           // SAFETY: Vec<String> serialisation is infallible.
+        let json =
+            serde_json::to_string(&entries).expect("Vec<String> serialises to JSON without error");
+        Ok(json)
+    }
+
+    /// Attach a named projection (currently only `"file"` is supported, and it
+    /// is auto-attached at server startup).
+    ///
+    /// Attaching `"file"` is idempotent — the server returns a success message
+    /// since the `FileProjection` is always active from startup.  Requesting
+    /// any other name returns an error.
+    #[tool(
+        name = "journal_projection_attach",
+        description = "Attach a named projection. Currently only 'file' is supported \
+                       and is always auto-attached at startup (idempotent). \
+                       Other names return an error.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn journal_projection_attach(
+        &self,
+        Parameters(params): Parameters<JournalProjectionAttachParams>,
+    ) -> Result<String, String> {
+        match params.name.as_str() {
+            "file" => {
+                tracing::info!(
+                    "journal_projection_attach: 'file' projection already auto-attached at startup"
+                );
+                Ok("file projection already auto-attached at startup".to_string())
+            }
+            other => {
+                tracing::warn!(
+                    name = other,
+                    "journal_projection_attach: unknown projection name"
+                );
+                Err(format!("projection not found: {other}"))
+            }
+        }
+    }
+
+    /// Detach a named projection.
+    ///
+    /// **Not yet supported** in this release (first cut scope).  The tool
+    /// entry is registered to satisfy Crux #1 (15 tool full registration)
+    /// but always returns an error.  Detach support is planned for ST7
+    /// (`docs/design.md §10 Step 7`).
+    #[tool(
+        name = "journal_projection_detach",
+        description = "Detach a named projection. \
+                       NOT YET SUPPORTED in this release (first cut, see design §10 Step 7). \
+                       Always returns an error.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn journal_projection_detach(
+        &self,
+        _params: Parameters<JournalProjectionDetachParams>,
+    ) -> Result<String, String> {
+        // Crux #1: this tool entry must be registered even though it is unsupported.
+        // The error signals the caller that detach will be supported in ST7.
+        tracing::warn!(
+            "journal_projection_detach: not yet supported (see docs/design.md §10 Step 7)"
+        );
+        Err(
+            "projection detach is not yet supported (first cut scope, see docs/design.md §10 Step 7)"
+                .to_string(),
+        )
+    }
+
+    /// Rebuild a named projection by replaying the full EventLog.
+    ///
+    /// Iterates all closed chapters in the EventLog and calls the projection's
+    /// `rebuild_chapter` for each one.  Useful after a projection output file
+    /// has been lost or corrupted.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` — the stable name of the projection to rebuild (e.g. `"file"`).
+    ///   Must match a projection registered at startup.
+    #[tool(
+        name = "journal_projection_rebuild",
+        description = "Rebuild a named projection by replaying the full EventLog. \
+                       Calls rebuild_chapter for every closed chapter. \
+                       Use 'file' to rebuild the workspace/journal.md output.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn journal_projection_rebuild(
+        &self,
+        Parameters(params): Parameters<JournalProjectionRebuildParams>,
+    ) -> Result<String, String> {
+        {
+            // SAFETY: see journal_open_chapter
+            let mut core = self.core.lock().unwrap();
+            core.rebuild_projection(&params.name).map_err(|e| {
+                tracing::warn!(error = ?e, name = %params.name, "journal_projection_rebuild failed");
+                e.to_string()
+            })?;
+        } // guard drops here — no await across the Mutex
+        Ok(format!("projection '{}' rebuilt", params.name))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -857,18 +1075,20 @@ mod tests {
         assert!(workspace.exists(), "workspace should be created by new()");
     }
 
-    /// T3 (error path) — tool_router now returns exactly 10 tools after ST2.
+    /// T3 (error path) — tool_router now returns exactly 15 tools after ST3.
     ///
-    /// Updated from "exactly 4 tools" in ST1 to "exactly 10 tools" in ST2
-    /// (4 lifecycle + 3 schema + 3 read tools).
+    /// Updated from "exactly 10 tools" in ST2 to "exactly 15 tools" in ST3
+    /// (4 lifecycle + 3 schema + 3 read + 5 projection/open_chapters/progress tools).
+    ///
+    /// Verifies Crux #1: all 15 tools are wired into the single `#[tool_router]` block.
     #[test]
-    fn test_subtask2_exactly_ten_tools() {
+    fn test_subtask3_exactly_fifteen_tools() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
         let server = make_server(&tmp);
         let count = server.tool_router.list_all().len();
         assert_eq!(
-            count, 10,
-            "ST2 tool_router should have exactly 10 tools, got {count}"
+            count, 15,
+            "ST3 tool_router should have exactly 15 tools (Crux #1), got {count}"
         );
     }
 
@@ -968,6 +1188,125 @@ mod tests {
         assert!(
             core.schema_spec("nonexistent-schema-v999").is_none(),
             "schema_spec should return None for an unknown key"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ST3 integration tests — Crux #1 final: 15 tool full registration assert
+    // -----------------------------------------------------------------------
+
+    /// Canonical spelling of all 15 MCP tools in the tool_router.
+    ///
+    /// This constant is the authoritative list.  Changing this list is a
+    /// Crux #1 or Crux #2 violation and requires human review.
+    const ALL_FIFTEEN_TOOLS: &[&str] = &[
+        // ST1: chapter lifecycle (4)
+        "journal_open_chapter",
+        "journal_append_section",
+        "journal_append_progress",
+        "journal_close_chapter",
+        // ST2: schema tools — Crux #2 requires each as an independent entry (3)
+        "journal_schema_load",
+        "journal_schema_list",
+        "journal_schema_show",
+        // ST2: read tools (3)
+        "journal_tail",
+        "journal_grep",
+        "journal_chapter_list",
+        // ST3: remaining tools (5)
+        "journal_open_chapters",
+        "journal_progress_of",
+        "journal_projection_attach",
+        "journal_projection_detach",
+        "journal_projection_rebuild",
+    ];
+
+    /// T1 (property) — Crux #1 final: all 15 tools are registered in the
+    /// single `#[tool_router] impl JournalMcpServer` block.
+    ///
+    /// This is the primary acceptance test for ST6 as a whole.
+    #[test]
+    fn test_all_fifteen_tools_registered() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let server = make_server(&tmp);
+        let tools = server.tool_router.list_all();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert_eq!(
+            tool_names.len(),
+            15,
+            "exactly 15 tools must be registered (Crux #1); got: {tool_names:?}"
+        );
+        for &name in ALL_FIFTEEN_TOOLS {
+            assert!(
+                tool_names.contains(&name),
+                "tool '{name}' must be registered (Crux #1); registered: {tool_names:?}"
+            );
+        }
+    }
+
+    /// T1 (property) — Crux #2 preserved: schema 3 tools remain independent
+    /// entries after ST3 additions.
+    #[test]
+    fn test_crux2_schema_tools_still_independent_after_st3() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let server = make_server(&tmp);
+        let tools = server.tool_router.list_all();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        for &name in &[
+            "journal_schema_load",
+            "journal_schema_list",
+            "journal_schema_show",
+        ] {
+            assert!(
+                tool_names.contains(&name),
+                "Crux #2: schema tool '{name}' must remain an independent entry; \
+                 registered: {tool_names:?}"
+            );
+        }
+    }
+
+    /// T2 (boundary) — `journal_projection_detach` tool entry exists even though
+    /// the handler always returns an error (Crux #1: tool entry != handler success).
+    #[test]
+    fn test_projection_detach_tool_entry_exists_crux1() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let server = make_server(&tmp);
+        let tools = server.tool_router.list_all();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(
+            tool_names.contains(&"journal_projection_detach"),
+            "Crux #1: journal_projection_detach tool entry must be registered \
+             even though it returns unsupported; registered: {tool_names:?}"
+        );
+    }
+
+    /// T2 (boundary) — `journal_open_chapters` returns a JSON array (empty
+    /// when no chapters are open on a fresh database).
+    #[test]
+    fn test_open_chapters_empty_on_fresh_db() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let server = make_server(&tmp);
+        let core = server.core.lock().expect("Mutex should not be poisoned");
+        let ids = core
+            .open_chapter_ids()
+            .expect("open_chapter_ids should succeed on fresh db");
+        assert!(
+            ids.is_empty(),
+            "fresh db should have no open chapters, got: {ids:?}"
+        );
+    }
+
+    /// T3 (error path) — `journal_progress_of` for an unknown chapter returns
+    /// an error from the EventLog layer.
+    #[test]
+    fn test_progress_of_unknown_chapter_returns_error() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let server = make_server(&tmp);
+        let core = server.core.lock().expect("Mutex should not be poisoned");
+        let result = core.progress_of(&journal::ChapterId("nonexistent-id".to_string()));
+        assert!(
+            result.is_err(),
+            "progress_of for a nonexistent chapter should return Err"
         );
     }
 }

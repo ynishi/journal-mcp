@@ -15,6 +15,7 @@
 //! use journal::JournalProjection;
 //! struct External;
 //! impl JournalProjection for External {
+//!     fn name(&self) -> &'static str { "external" }
 //!     fn mark_dirty(
 //!         &mut self,
 //!         _id: &journal::ChapterId,
@@ -88,6 +89,18 @@ pub enum ProjectionError {
 /// This trait is sealed (see the module-level doc).  Only types inside the
 /// `journal` crate may implement it.
 pub trait JournalProjection: private::Sealed + Send {
+    /// Stable, lowercase identifier for this projection type.
+    ///
+    /// Used by [`JournalCore::rebuild_projection`] and
+    /// [`JournalCore::list_projection_names`] for named lookup.
+    ///
+    /// # Returns
+    ///
+    /// A `'static str` naming this projection, e.g. `"file"` for
+    /// [`FileProjection`].  The name must be unique among all projections
+    /// registered with a given `JournalCore`.
+    fn name(&self) -> &'static str;
+
     /// Mark the chapter identified by `id` as requiring a rebuild.
     ///
     /// Called by [`JournalCore::append_section`] after a successful

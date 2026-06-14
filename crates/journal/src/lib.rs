@@ -1,4 +1,9 @@
-//! journal — project canonical history primitive.
+//! `journal` — project canonical history primitive.
+//!
+//! Provides [`JournalCore`] for schema-driven chapter lifecycle management,
+//! [`EventLog`] for append-only persistence, [`SchemaRegistry`] for schema
+//! lookup, and [`JournalProjection`] for derived-view dispatch (e.g.
+//! [`FileProjection`] which renders chapters to a Markdown file).
 //!
 //! See `docs/design.md` for the full design.
 
