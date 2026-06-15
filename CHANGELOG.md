@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `crates/journal-mcp-core/src/projection/vector.rs`: `VectorProjection`
+  + `VectorClient` trait — embedding-based semantic search index
+  (v0.3.0 ε-1)
+  - **ε-1 scope**: projection logic + `VectorClient` trait abstraction
+    over the embedding-compute path + `VectorConfig` (dimension) +
+    in-memory `BTreeMap<chapter_id, Vec<f32>>` store + cosine-similarity
+    `search(query, limit)` method + 9 unit tests using a `MockEmbedder`
+    / `FixedEmbedder` / `WrongDimensionEmbedder` recorder
+  - **Follow-up commits on the same topic branch land**:
+    - ε-2: persistent `sqlite-vec` virtual table backend replacing the
+      in-memory store
+    - ε-3: concrete `CandleEmbedder` (`VectorClient` impl using
+      `candle-core` + `tokenizers` + `hf-hub` to load
+      `all-MiniLM-L6-v2` locally, Metal acceleration on Apple Silicon)
+    - ε-4: 17th MCP tool `journal_semantic_search(query, project_root?,
+      limit?)`
+  - `VectorClient` trait — single `embed(text) -> Vec<f32>` method.
+    Implementations route to a locally-loaded model (ε-3 candle) or a
+    remote HTTP endpoint (Ollama / vLLM / SGLang). Deterministic
+    contract (same input → same vector within a process).
+  - `VectorConfig` — embedding `dimension` field (default 384 for
+    `all-MiniLM-L6-v2`).
+  - `VectorProjection<C: VectorClient>` — generic over the embedder so
+    ε-3 candle + ε-2 sqlite-vec persistence swap in without changing
+    the public method surface.
+  - `rebuild_chapter` pipeline: render section bodies (skip non-section
+    events) → embed → dimension check → insert or replace in the
+    in-memory map. `mark_dirty` is a no-op (full rebuild covers it).
+  - `search(query, limit)`: embed query → cosine-similarity against
+    every stored embedding → sort descending → truncate to `limit`.
+    Returns `Vec<(chapter_id, score)>` where score ∈ `[-1.0, 1.0]`.
+    `BTreeMap` iteration gives deterministic tie-breaking.
+  - 9 new unit tests: rebuild stores embedding, replaces existing
+    embedding, dimension-mismatch error, render_text skips non-section
+    events, search ranks exact match first, search respects limit,
+    search dimension-mismatch error, stable `name() == "vector"`,
+    cosine_similarity hand-verified values.
+  - No new dependencies (in-memory store + pure-Rust cosine).
+  - Closes #4f024175 partial (ε-1 surface; ε-2/ε-3/ε-4 carry on the
+    same issue's follow-up commits).
 - `crates/journal-mcp-core/src/projection/miniapp_client.rs`:
   `MiniAppCoreClient` — concrete [`MiniAppClient`] impl using
   `mini-app-core` directly (no IPC, no MCP wire) (v0.3.0 δ-2)
