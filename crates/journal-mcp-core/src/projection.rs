@@ -41,6 +41,7 @@ pub mod miniapp;
 pub mod miniapp_client;
 pub mod outline;
 pub mod vector;
+pub mod vector_sqlite;
 
 pub use file::FileProjection;
 pub use fts5::FTS5Projection;
@@ -50,6 +51,7 @@ pub use miniapp::{MiniAppClient, MiniAppConfig, MiniAppProjection};
 pub use miniapp_client::MiniAppCoreClient;
 pub use outline::{OutlineClient, OutlineConfig, OutlineProjection};
 pub use vector::{VectorClient, VectorConfig, VectorProjection};
+pub use vector_sqlite::SqliteVectorProjection;
 
 // ---------------------------------------------------------------------------
 // Sealed module (Crux: Sealed trait 外部 impl 禁止境界)

@@ -251,7 +251,7 @@ impl<C: VectorClient + 'static> JournalProjection for VectorProjection<C> {
 /// all-zero vectors) return `0.0` rather than producing NaN.
 ///
 /// `cos_sim(a, b) = (a · b) / (||a|| * ||b||)` ∈ `[-1.0, 1.0]`.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+pub(super) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }

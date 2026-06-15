@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `crates/journal-mcp-core/src/projection/vector_sqlite.rs`:
+  `SqliteVectorProjection` — persistent variant of
+  [`VectorProjection`](crate::projection::vector) backed by a plain
+  SQLite `BLOB` column (v0.3.0 ε-2)
+  - **ε-2 scope**: persistent storage replacing ε-1's in-memory
+    `BTreeMap` so embeddings survive process restarts.
+  - **Plain SQLite (no extension)**: stores embeddings as f32
+    little-endian BLOB in a regular table — no `sqlite-vec` dependency
+    (upstream is alpha-stage 0.1.10-alpha.4 with macOS arm64 build
+    failures). Linear-scan cosine search is acceptable at the 100-1000
+    chapter scale typical of project canonical histories.
+  - When `sqlite-vec` stabilizes, a separate `SqliteVecVectorProjection`
+    backend can land alongside this one without breaking the API.
+  - Storage schema:
+    `CREATE TABLE journal_vec_embeddings (chapter_id TEXT PRIMARY KEY,
+    embedding BLOB NOT NULL)` — chapter_id keyed, BLOB is f32 LE.
+  - `SqliteVectorProjection::open(db_path, client, config)` — idempotent
+    constructor; creates the table with `CREATE TABLE IF NOT EXISTS`.
+  - `mark_dirty(id)` → `DELETE FROM journal_vec_embeddings WHERE
+    chapter_id = ?`.
+  - `rebuild_chapter(replay)` → render section bodies → embed → check
+    dimension → `INSERT OR REPLACE`.
+  - `search(query, limit)` → embed query → SELECT all → linear-scan
+    `cosine_similarity` → sort descending → truncate.
+  - `fetch_embedding(chapter_id)` / `count()` test-facing inspection
+    helpers.
+  - 10 new unit tests: rebuild round-trip via BLOB, embeddings persist
+    across close + reopen, rebuild replaces existing row, mark_dirty
+    deletes row, search ranks exact match first, search respects limit,
+    rebuild dimension-mismatch error, search dimension-mismatch error,
+    stable `name() == "vector-sqlite"`, blob codec bit-exact round
+    trip.
+  - `cosine_similarity` (in `vector` module) raised to
+    `pub(super)` so the SQLite backend can reuse the same scorer as
+    ε-1 — guarantees identical ranking semantics across backends.
+  - No new dependencies (uses existing rusqlite). Closes #4f024175
+    partial (ε-2 surface; ε-3/ε-4 carry on the same issue).
 - `crates/journal-mcp-core/src/projection/vector.rs`: `VectorProjection`
   + `VectorClient` trait — embedding-based semantic search index
   (v0.3.0 ε-1)
