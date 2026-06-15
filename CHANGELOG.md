@@ -5,10 +5,240 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — 2026-06-15
 
 ### Added
 
+- `crates/journal-mcp-core/src/projection/vector_sqlite.rs`:
+  `SqliteVectorProjection` — persistent variant of
+  [`VectorProjection`](crate::projection::vector) backed by a plain
+  SQLite `BLOB` column (v0.2.0 ε-2)
+  - **ε-2 scope**: persistent storage replacing ε-1's in-memory
+    `BTreeMap` so embeddings survive process restarts.
+  - **Plain SQLite (no extension)**: stores embeddings as f32
+    little-endian BLOB in a regular table — no `sqlite-vec` dependency
+    (upstream is alpha-stage 0.1.10-alpha.4 with macOS arm64 build
+    failures). Linear-scan cosine search is acceptable at the 100-1000
+    chapter scale typical of project canonical histories.
+  - When `sqlite-vec` stabilizes, a separate `SqliteVecVectorProjection`
+    backend can land alongside this one without breaking the API.
+  - Storage schema:
+    `CREATE TABLE journal_vec_embeddings (chapter_id TEXT PRIMARY KEY,
+    embedding BLOB NOT NULL)` — chapter_id keyed, BLOB is f32 LE.
+  - `SqliteVectorProjection::open(db_path, client, config)` — idempotent
+    constructor; creates the table with `CREATE TABLE IF NOT EXISTS`.
+  - `mark_dirty(id)` → `DELETE FROM journal_vec_embeddings WHERE
+    chapter_id = ?`.
+  - `rebuild_chapter(replay)` → render section bodies → embed → check
+    dimension → `INSERT OR REPLACE`.
+  - `search(query, limit)` → embed query → SELECT all → linear-scan
+    `cosine_similarity` → sort descending → truncate.
+  - `fetch_embedding(chapter_id)` / `count()` test-facing inspection
+    helpers.
+  - 10 new unit tests: rebuild round-trip via BLOB, embeddings persist
+    across close + reopen, rebuild replaces existing row, mark_dirty
+    deletes row, search ranks exact match first, search respects limit,
+    rebuild dimension-mismatch error, search dimension-mismatch error,
+    stable `name() == "vector-sqlite"`, blob codec bit-exact round
+    trip.
+  - `cosine_similarity` (in `vector` module) raised to
+    `pub(super)` so the SQLite backend can reuse the same scorer as
+    ε-1 — guarantees identical ranking semantics across backends.
+  - No new dependencies (uses existing rusqlite). Closes #(internal tracker)
+    partial (ε-2 surface; ε-3/ε-4 carry on the same issue).
+- `crates/journal-mcp-core/src/projection/vector.rs`: `VectorProjection`
+  + `VectorClient` trait — embedding-based semantic search index
+  (v0.2.0 ε-1)
+  - **ε-1 scope**: projection logic + `VectorClient` trait abstraction
+    over the embedding-compute path + `VectorConfig` (dimension) +
+    in-memory `BTreeMap<chapter_id, Vec<f32>>` store + cosine-similarity
+    `search(query, limit)` method + 9 unit tests using a `MockEmbedder`
+    / `FixedEmbedder` / `WrongDimensionEmbedder` recorder
+  - **Follow-up commits on the same topic branch land**:
+    - ε-2: persistent `sqlite-vec` virtual table backend replacing the
+      in-memory store
+    - ε-3: concrete `CandleEmbedder` (`VectorClient` impl using
+      `candle-core` + `tokenizers` + `hf-hub` to load
+      `all-MiniLM-L6-v2` locally, Metal acceleration on Apple Silicon)
+    - ε-4: 17th MCP tool `journal_semantic_search(query, project_root?,
+      limit?)`
+  - `VectorClient` trait — single `embed(text) -> Vec<f32>` method.
+    Implementations route to a locally-loaded model (ε-3 candle) or a
+    remote HTTP endpoint (Ollama / vLLM / SGLang). Deterministic
+    contract (same input → same vector within a process).
+  - `VectorConfig` — embedding `dimension` field (default 384 for
+    `all-MiniLM-L6-v2`).
+  - `VectorProjection<C: VectorClient>` — generic over the embedder so
+    ε-3 candle + ε-2 sqlite-vec persistence swap in without changing
+    the public method surface.
+  - `rebuild_chapter` pipeline: render section bodies (skip non-section
+    events) → embed → dimension check → insert or replace in the
+    in-memory map. `mark_dirty` is a no-op (full rebuild covers it).
+  - `search(query, limit)`: embed query → cosine-similarity against
+    every stored embedding → sort descending → truncate to `limit`.
+    Returns `Vec<(chapter_id, score)>` where score ∈ `[-1.0, 1.0]`.
+    `BTreeMap` iteration gives deterministic tie-breaking.
+  - 9 new unit tests: rebuild stores embedding, replaces existing
+    embedding, dimension-mismatch error, render_text skips non-section
+    events, search ranks exact match first, search respects limit,
+    search dimension-mismatch error, stable `name() == "vector"`,
+    cosine_similarity hand-verified values.
+  - No new dependencies (in-memory store + pure-Rust cosine).
+  - Closes #(internal tracker) partial (ε-1 surface; ε-2/ε-3/ε-4 carry on the
+    same issue's follow-up commits).
+- `crates/journal-mcp-core/src/projection/miniapp_client.rs`:
+  `MiniAppCoreClient` — concrete [`MiniAppClient`] impl using
+  `mini-app-core` directly (no IPC, no MCP wire) (v0.3.0 δ-2)
+  - **Feature flag**: gated behind the optional `miniapp-core` Cargo
+    feature so callers that do not need the MiniApp projection do not
+    pay the dependency cost.
+  - **SDK-direct path**: routes the 4 `MiniAppClient` trait methods to
+    the corresponding `mini-app_core::store::Store` async APIs via
+    in-process function calls. No `rmcp` child-process spawn, no
+    JSON-RPC over stdio. Latency ~ns vs ~ms for the alternative rmcp
+    stdio path.
+  - **Adapter mechanism rationale**: `mini-app-core` is published on
+    crates.io as a "transport-agnostic CRUD library" so SDK-direct is
+    the project's intended consumption mode. (The sibling γ-2
+    OutlineProjection rmcp client uses a different mechanism because
+    outline-mcp's core crate is not published.)
+  - **Sync ↔ async bridge**: `block_on(future)` wraps
+    `tokio::task::block_in_place` + `Handle::current().block_on` so the
+    sync trait methods can drive the async `Store` APIs from inside an
+    existing `#[tokio::main]` multi-threaded runtime.
+  - **`schema_ensure`**: no-op (mini-app-core's `Store::open` already
+    created the table with the supplied schema at `MiniAppCoreClient::open`
+    construction time; mini-app-core does not have a separate
+    "ensure table exists" API).
+  - **Optional dependencies** (gated by the feature flag):
+    `mini-app-core 0.11`, `serde_yaml_bw 2.5` (mini-app-core's schema
+    parser), `tokio` with `rt-multi-thread` + `macros` features.
+  - 4 new integration tests (gated by feature): round-trip
+    create/query/update through real SQLite; query returns None when
+    absent; schema_ensure is a no-op; open returns Err on malformed
+    YAML.
+  - Closes #2b562589 (δ-2 wire-up; δ-1 trait + generic + mock landed in
+    b855a5e).
+
+### Changed
+
+- `rusqlite` workspace dependency bumped from `0.31` (→ `libsqlite3-sys 0.28`)
+  to `0.32` (→ `libsqlite3-sys 0.30`). Required for the upcoming
+  `MiniAppCoreClient` (v0.3.0 δ-2, SDK-direct path) which pulls in
+  `mini-app-core 0.11` — itself depending on `rusqlite 0.32`. Without the
+  bump, `libsqlite3-sys` link conflict prevents the `miniapp-core` feature
+  from building. No source changes were required in `journal-mcp-core` /
+  `journal-mcp`; all 64 existing unit + integration + doc tests pass
+  unchanged on `rusqlite 0.32`.
+
+### Added
+
+- `crates/journal-mcp-core/src/projection/miniapp.rs`: `MiniAppProjection`
+  + `MiniAppClient` trait — sync chapter metadata to a mini-app table
+  (v0.3.0 δ-1)
+  - **δ-1 scope**: projection logic + `MiniAppClient` trait abstraction +
+    `MiniAppConfig` (table_name / project_label) + embedded
+    `miniapp_schema.yaml` for auto-deploy + 8 unit tests using a
+    `MockMiniAppClient` recorder
+  - **δ-2 deferred to follow-up commit on the same topic branch
+    (sibling to γ-2)**: the concrete `RmcpStdioMiniAppClient` that spawns
+    the real `mini-app-mcp` binary and routes calls over stdio via the
+    `rmcp` client primitives. Both δ-2 and γ-2 (Outline) share the same
+    rmcp child-process wrapper pattern.
+  - Row mapping: one row per chapter (keyed by `chapter_id`) with fields
+    `chapter_id / project_label / schema_id / current_state / opened_at /
+    closed_at / decided_summary / issue_refs[]`. `decided_summary` is the
+    first non-empty line of the `Decided` section; `issue_refs` is the
+    list of canonical UUIDs (8-4-4-4-12 hex pattern) extracted from the
+    `Issues touched` section body. UUID extraction uses a manual
+    sliding-window scanner so the crate does not pick up a `regex`
+    dependency.
+  - `rebuild_chapter` pipeline: lazy `schema_ensure` on first call
+    (idempotent for subsequent calls) → build payload (chapter metadata +
+    decided_summary + issue_refs) → query existing row by `chapter_id` →
+    `row_update` (if exists) or `row_create` (if absent) → clear dirty
+    entry on success.
+  - 8 new unit tests covering: schema_ensure-called-once, fresh-routes-to-create,
+    existing-routes-to-update, decided_summary extraction, issue_refs
+    UUID extraction, mark_dirty/rebuild dirty-set lifecycle,
+    multi-rebuild idempotent routing, custom config forwarded,
+    scan_uuids no false positives on commit hashes / wrong-width hex.
+  - Closes #2b562589 (δ-1 surface; δ-2 wire-up tracked separately on
+    the same issue's follow-up commit).
+- `crates/journal-mcp-core/src/projection/outline.rs`: `OutlineProjection`
+  + `OutlineClient` trait — sync chapters as nodes in an Outline-MCP book
+  (v0.3.0 γ-1)
+  - **γ-1 scope**: projection logic + `OutlineClient` trait abstraction +
+    `OutlineConfig` (book_slug / parent_node_path) + 7 unit tests
+    using a `MockOutlineClient` recorder
+  - **γ-2 deferred to follow-up commit on the same topic branch**: the
+    concrete `RmcpStdioOutlineClient` that spawns the real `outline-mcp`
+    binary and routes calls over stdio via the `rmcp` client primitives.
+    The trait-based split keeps γ-1 self-contained and unit-testable
+    without requiring a running `outline-mcp` process.
+  - Node mapping: `Outline book = config.book_slug` → parent node
+    (`config.parent_node_path`, default `"Chapters"`) → child node per
+    chapter, slug = `chapter_id`. Body is rendered Markdown (H1 chapter
+    heading + H2 section headings + section bodies).
+  - `rebuild_chapter` pipeline: render body → `node_query` for existing
+    node → `node_update` (if exists) or `node_create` (if absent) → clear
+    dirty entry on success. Idempotent across repeated rebuilds.
+  - `mark_dirty` queues the chapter ID into an internal `HashSet`;
+    callers may batch-flush via repeated `rebuild_chapter` calls.
+  - Non-`section_append` events (open / close / append_progress / import)
+    are skipped during body rendering — only section bodies feed the
+    human-readable node body.
+  - 7 new unit tests covering: fresh-chapter-routes-to-create,
+    existing-chapter-routes-to-update, mark_dirty/rebuild dirty-set
+    lifecycle, multi-rebuild idempotent routing, render_body skips
+    non-section events, custom config forwarded to client, stable
+    `name() == "outline"`.
+  - Closes #ea35e266 (γ-1 surface; γ-2 wire-up tracked separately on
+    the same issue's follow-up commit).
+- `crates/journal-mcp-core/src/projection/json.rs`: `JsonProjection` —
+  machine-readable JSON dump of all chapters + events (v0.3.0 β)
+  - Output: `workspace/journal.json` (or caller-supplied path) with a
+    stable envelope: `{schema_version: 1, chapters: [{chapter_id, schema_id,
+    current_state, opened_at, closed_at, events: [...]}]}` for jq /
+    downstream-agent / CI consumption
+  - Chapters emitted in lexicographic chapter_id order (matches
+    FileProjection's date-slug → chronological ordering)
+  - Atomic write via tempfile + rename: readers observe either complete
+    previous content or complete new content, never partial
+  - `mark_dirty` is a no-op (full snapshot per rebuild covers the dirty
+    chapter implicitly)
+  - `rebuild_chapter(replay)` updates the in-memory `BTreeMap` then re-writes
+    the entire envelope to disk
+  - Pretty-printed (2-space indent) for human readability; size overhead vs
+    compact JSON is small relative to event payload size
+  - 7 new unit tests (new-does-not-touch-fs, valid-envelope-round-trip,
+    idempotency, multi-chapter-lex-ordering, replace-existing-chapter,
+    auto-create-parent-dir, mark_dirty-no-op)
+  - No new dependencies (`serde_json` already in tree). Closes #75991975.
+- `crates/journal-mcp-core/src/projection/fts5.rs`: `FTS5Projection` — SQLite
+  FTS5 full-text search index over chapter section bodies (v0.3.0 α)
+  - SQLite virtual table `journal_fts` co-located in `.journal.db`, indexed
+    by the `trigram` tokenizer so the FTS5 `MATCH` operator behaves like
+    SQL `LIKE '%pattern%'` substring search (drop-in semantic compat with
+    the existing `LIKE`-based `journal_grep` linear scan); ≥100x speedup
+    expected at 1000+ chapters
+  - `FTS5Projection::open(db_path)` — idempotent constructor
+  - `FTS5Projection::search(pattern)` — substring search helper; pattern
+    length must be ≥3 characters (trigram tokenizer requirement)
+  - Implements the sealed `JournalProjection` trait
+    (`name() == "fts5"` / `mark_dirty` / `rebuild_chapter`); only
+    `section_append` events are indexed
+  - Multi-connection access against the EventLog DB is WAL-safe
+  - 7 new unit tests (open idempotency, rebuild-then-search, rebuild
+    idempotency, mark_dirty removal, non-section-event skip, multi-chapter
+    isolation, Japanese substring match via trigram)
+  - `ProjectionError::Sql(rusqlite::Error)` and
+    `ProjectionError::Json(serde_json::Error)` variants added
+  - Handler-side wire-up (routing `journal_grep` through the FTS5 fast
+    path when attached) lands in a follow-up commit alongside the
+    default-attached set decision (master issue bc3b7c79 / design doc §3).
+    Closes #7429275b (projection implementation surface; handler wire-up
+    tracked separately).
 - `crates/journal-mcp/src/main.rs`: per-call `project_root` override on all 16
   MCP tools (multi-project workflow support)
   - Every `Journal*Params` struct gains a `#[serde(default)] pub project_root:
@@ -70,6 +300,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `journal.md` → EventLog (refs: commit `194df30`). Covers schema compliance
   verify, uniform-stub normalization, backup, import execution, rollback,
   and the new append protocol (anti-patterns + fail-loud recipe wrapper).
+
+### Deferred (carry to v0.3.0+)
+
+v0.2.0 release scope は journal-mcp 内の **storage primitive 層**
+(FTS5 + Json + γ-1 Outline trait + δ-1/δ-2 MiniApp + ε-1/ε-2 Vector
+storage) の完成を確定。 embedding 計算 (concrete embedder model)、 外部
+MCP 連携の concrete client、 handler-side wire-up はいずれも external
+layer 領分として v0.3.0+ で別途。
+
+- **γ-2**: `OutlineProjection` concrete `rmcp` client (γ-1 trait + mock
+  は v0.2.0 着地、 concrete impl が carry)。 outline-mcp 上流が
+  single-crate (SDK split crate 未公開) のため、 (a) inline rmcp client
+  を journal-mcp-core 側で wrap、 もしくは (c) 別 layer (外部 bridge crate
+  / 別 MCP server) で扱う 2 path を v0.3.0+ で再判定。 (issue: 別途
+  mini-app 起票)
+- **ε-3 CandleEmbedder**: `candle-core` + `tokenizers` + `hf-hub` +
+  `all-MiniLM-L6-v2` Metal accel の concrete `VectorClient` impl。
+  embedding 計算は journal-mcp 領分外、 external layer (別 crate / 別
+  MCP server / 利用側で任意 embedder を inject する path) で扱う方向。
+  v0.2.0 では ε-1 trait + ε-2 SQLite storage まで in-tree、 concrete
+  embedder は v0.3.0+ で再検討。 (issue (internal tracker))
+- **ε-4 17th MCP tool `journal_semantic_search`**: ε-3 sibling、 同上
+  carry。 storage primitive は v0.2.0 で揃ったので handler-side で
+  user-supplied embedder を受けて search する path は v0.3.0+ で。
+  (issue (internal tracker))
+- **handler wire-up**: FTS5 / Json / Vector の各 projection を
+  default-attached する handler-side 配線、 および `journal_grep` の
+  FTS5 fast path への切り替えは v0.3.0+ で別途。
 
 ## [0.1.0] — 2026-06-14
 
