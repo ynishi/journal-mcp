@@ -21,8 +21,8 @@ use journal_mcp_core::{
 // Test-only schema YAML (used by T6 to prove no literal hardcode)
 // ---------------------------------------------------------------------------
 
-/// ytk-canonical-v1 schema key as registered in the embedded registry.
-const YTK_SCHEMA_ID: &str = "ytk-canonical-v1";
+/// journal-mcp-canonical-v1 schema key as registered in the embedded registry.
+const JOURNAL_MCP_SCHEMA_ID: &str = "journal-mcp-canonical-v1";
 
 /// A minimal custom schema for T6 that uses `# X` as chapter_header to prove
 /// `file.rs` does not hardcode `"## "`.
@@ -43,7 +43,7 @@ const ALT_SCHEMA_YAML: &str = concat!(
 
 /// Build a minimal `ChapterReplay` for the given chapter id with no events.
 fn make_replay(id: &str) -> ChapterReplay {
-    make_replay_with_events(id, YTK_SCHEMA_ID, vec![])
+    make_replay_with_events(id, JOURNAL_MCP_SCHEMA_ID, vec![])
 }
 
 /// Build a `ChapterReplay` for the given chapter id and schema_id with events.
@@ -302,7 +302,7 @@ fn test_debounce_content_change_forces_write() {
     let mut fp = make_fp_with_registry(out_path.clone(), registry, Duration::from_secs(60));
 
     // First rebuild with no events.
-    let replay_v1 = make_replay_with_events("2026-06-14", YTK_SCHEMA_ID, vec![]);
+    let replay_v1 = make_replay_with_events("2026-06-14", JOURNAL_MCP_SCHEMA_ID, vec![]);
     fp.rebuild_chapter(&replay_v1)
         .expect("first rebuild should succeed");
 
@@ -313,7 +313,7 @@ fn test_debounce_content_change_forces_write() {
     // Second rebuild with an added event (different content → different hash).
     let replay_v2 = make_replay_with_events(
         "2026-06-14",
-        YTK_SCHEMA_ID,
+        JOURNAL_MCP_SCHEMA_ID,
         vec![make_event("Verified", "cargo test all pass")],
     );
     fp.rebuild_chapter(&replay_v2)
@@ -370,13 +370,13 @@ fn test_debounce_same_content_skips() {
 // T6 — Crux 3: schema-driven render
 // ---------------------------------------------------------------------------
 
-/// T6a — ytk-canonical-v1 chapter header starts with `## `.
+/// T6a — journal-mcp-canonical-v1 chapter header starts with `## `.
 ///
 /// Does not assert the literal `"## "` as a hardcoded expectation about
 /// implementation internals, but rather asserts the schema-declared template
-/// expansion.  ytk-canonical-v1 declares `chapter_header: "## {date} — {name}"`.
+/// expansion.  journal-mcp-canonical-v1 declares `chapter_header: "## {date} — {name}"`.
 #[test]
-fn test_schema_driven_render_ytk_canonical() {
+fn test_schema_driven_render_journal_mcp_canonical() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out_path = tmp.path().join("journal.md");
     let mut fp = make_fp(out_path.clone());
@@ -386,7 +386,7 @@ fn test_schema_driven_render_ytk_canonical() {
 
     let content = std::fs::read_to_string(&out_path).expect("read output");
 
-    // ytk-canonical-v1 declares chapter_header = "## {date} — {name}"
+    // journal-mcp-canonical-v1 declares chapter_header = "## {date} — {name}"
     assert!(
         content.starts_with("## 2026-06-14"),
         "output must start with the schema-declared chapter_header expanded; got: {:?}",

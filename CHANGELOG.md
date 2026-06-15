@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(no entries yet)_
+### Changed (BREAKING)
+
+- Default schema registry key renamed from `ytk-canonical-v1` to `journal-mcp-canonical-v1`
+  (and YAML `schema_id` field from `ytk-canonical` to `journal-mcp-canonical`) to align with
+  the project name instead of a personal handle. The embedded YAML file was renamed to
+  `crates/journal-mcp-core/embed/journal_mcp_canonical_v1.yaml`. Callers that pass the
+  schema ID literal to `open_chapter` / `schema_load` must update the string. Historical
+  CHANGELOG entries below (v0.1.0) retain the original `ytk-canonical-v1` literal because
+  that was the published API at that time.
 
 ## [0.1.0] — 2026-06-14
 

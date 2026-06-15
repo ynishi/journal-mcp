@@ -1,6 +1,6 @@
-schema_id: ytk-canonical
+schema_id: journal-mcp-canonical
 version: 1
-description: ytk default canonical history schema
+description: journal-mcp default canonical history schema
 
 states:
   - id: open

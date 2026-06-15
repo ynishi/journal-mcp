@@ -35,7 +35,7 @@ use serde::Deserialize;
 pub struct JournalOpenChapterParams {
     /// Chapter name, typically a date slug such as `"2026-06-14"`.
     pub name: String,
-    /// Schema ID that governs this chapter (e.g. `"ytk-canonical-v1"`).
+    /// Schema ID that governs this chapter (e.g. `"journal-mcp-canonical-v1"`).
     pub schema_id: String,
 }
 
@@ -84,7 +84,7 @@ pub struct JournalSchemaListParams {}
 /// Parameters for `journal_schema_show`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct JournalSchemaShowParams {
-    /// Registry key to look up (e.g. `"ytk-canonical-v1"`).
+    /// Registry key to look up (e.g. `"journal-mcp-canonical-v1"`).
     pub key: String,
 }
 
@@ -441,7 +441,7 @@ impl JournalMcpServer {
 
     /// Load a ChapterSchema YAML literal into the SchemaRegistry L2 layer.
     ///
-    /// Returns the registry key that was inserted (e.g. `"ytk-canonical-v1"`).
+    /// Returns the registry key that was inserted (e.g. `"journal-mcp-canonical-v1"`).
     /// Repeated calls with the same YAML are idempotent (same key, same value).
     ///
     /// # Crux #2
@@ -452,7 +452,7 @@ impl JournalMcpServer {
     #[tool(
         name = "journal_schema_load",
         description = "Load a ChapterSchema YAML literal into the SchemaRegistry L2 layer. \
-                       Returns the registry key that was inserted (e.g. \"ytk-canonical-v1\"). \
+                       Returns the registry key that was inserted (e.g. \"journal-mcp-canonical-v1\"). \
                        Idempotent: repeated calls with the same YAML overwrite with the same value.",
         annotations(
             read_only_hint = false,
@@ -479,7 +479,7 @@ impl JournalMcpServer {
     /// List all available schema registry keys (built-in L1 + project-local L2).
     ///
     /// Returns a JSON array of key strings such as
-    /// `["ytk-canonical-v1", "madr-v1", "minimal-v1"]`.
+    /// `["journal-mcp-canonical-v1", "madr-v1", "minimal-v1"]`.
     ///
     /// # Crux #2
     ///
@@ -961,7 +961,7 @@ impl JournalMcpServer {
 
     /// Import chapters from an existing markdown file into the journal.
     ///
-    /// Parses the file using ytk-canonical-v1 rules (h2=chapter, h3=section),
+    /// Parses the file using journal-mcp-canonical-v1 rules (h2=chapter, h3=section),
     /// inserts all chapters in one atomic SQLite transaction, and returns a JSON
     /// array of the chapter IDs that were imported.
     ///
@@ -971,7 +971,7 @@ impl JournalMcpServer {
     /// after import if rendering is needed (Crux #1 explicit-only render policy).
     #[tool(
         name = "journal_import",
-        description = "Import chapters from a markdown file (ytk-canonical-v1: h2=chapter, h3=section). \
+        description = "Import chapters from a markdown file (journal-mcp-canonical-v1: h2=chapter, h3=section). \
                        Atomic batch insert — any chapter_id collision rolls back the entire batch. \
                        Returns JSON array of imported chapter IDs. \
                        Does NOT trigger projection rebuild (call journal_projection_rebuild explicitly).",
@@ -1241,7 +1241,7 @@ mod tests {
     /// T2 (boundary) — schema_list returns at least 3 built-in schema keys.
     ///
     /// Verifies that `journal_schema_list` returns meaningful data (at least
-    /// the 3 built-in schemas: ytk-canonical-v1, madr-v1, minimal-v1).
+    /// the 3 built-in schemas: journal-mcp-canonical-v1, madr-v1, minimal-v1).
     #[test]
     fn test_schema_list_returns_builtins() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
@@ -1253,8 +1253,8 @@ mod tests {
             "schema_keys should return at least 3 built-in keys, got: {keys:?}"
         );
         assert!(
-            keys.iter().any(|k| k.contains("ytk-canonical")),
-            "built-in ytk-canonical should be in schema_keys; got: {keys:?}"
+            keys.iter().any(|k| k.contains("journal-mcp-canonical")),
+            "built-in journal-mcp-canonical should be in schema_keys; got: {keys:?}"
         );
     }
 

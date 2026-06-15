@@ -59,7 +59,7 @@ use crate::{ChapterId, ChapterReplay, SchemaRegistry};
 ///
 /// All chapters are assembled in `chapter_dumps` (a `BTreeMap` keyed by
 /// chapter-id string).  On each `rebuild_chapter` call the entire file is
-/// re-written with all chapters in lexicographic order.  For ytk-canonical-v1
+/// re-written with all chapters in lexicographic order.  For journal-mcp-canonical-v1
 /// this is date-string order, which matches chronological order.
 pub struct FileProjection {
     /// Filesystem path of the target Markdown file (e.g. `workspace/journal.md`).
@@ -245,7 +245,7 @@ impl JournalProjection for FileProjection {
 /// # Placeholder expansion
 ///
 /// * `chapter_header`: `{date}` and `{name}` are both replaced with
-///   `chapter_id` (ytk-canonical-v1 uses the chapter_id as the date slug).
+///   `chapter_id` (journal-mcp-canonical-v1 uses the chapter_id as the date slug).
 /// * `section_header`: `{section_name}` is replaced with the section name.
 ///
 /// When `chapter_header` or `section_header` is `None` the fallback strings

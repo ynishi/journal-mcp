@@ -232,9 +232,9 @@ struct RawSchema {
 /// # Registry key vs `schema_id`
 ///
 /// The `SchemaRegistry` stores schemas under a composite key of the form
-/// `"<schema_id>-v<version>"` (e.g. `"ytk-canonical-v1"`).  The accessor
+/// `"<schema_id>-v<version>"` (e.g. `"journal-mcp-canonical-v1"`).  The accessor
 /// [`ChapterSchema::schema_id`] returns only the YAML literal value
-/// (e.g. `"ytk-canonical"`), **not** the registry key.
+/// (e.g. `"journal-mcp-canonical"`), **not** the registry key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChapterSchema {
     schema_id: String,
@@ -312,9 +312,9 @@ impl ChapterSchema {
         })
     }
 
-    /// The YAML literal `schema_id` value (e.g. `"ytk-canonical"`).
+    /// The YAML literal `schema_id` value (e.g. `"journal-mcp-canonical"`).
     ///
-    /// This is **not** the registry lookup key. Use `"ytk-canonical-v1"` to
+    /// This is **not** the registry lookup key. Use `"journal-mcp-canonical-v1"` to
     /// look up in [`SchemaRegistry`](crate::SchemaRegistry).
     pub fn schema_id(&self) -> &str {
         &self.schema_id

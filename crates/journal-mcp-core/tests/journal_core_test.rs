@@ -44,7 +44,7 @@ fn test_state_transition_happy_path() {
     let (mut core, _dir) = make_core();
 
     let id = core
-        .open_chapter("2026-06-13", "ytk-canonical-v1")
+        .open_chapter("2026-06-13", "journal-mcp-canonical-v1")
         .expect("open_chapter should succeed");
 
     // Append all 5 required sections with non-empty bodies.
@@ -191,14 +191,14 @@ fn test_append_once_policy() {
 
 /// T3a — close_chapter fails when a required section is completely absent.
 ///
-/// Appends only `Verified` to a ytk-canonical-v1 chapter; `Done`, `Decided`,
+/// Appends only `Verified` to a journal-mcp-canonical-v1 chapter; `Done`, `Decided`,
 /// `Not Done`, and `Issues touched` are absent → `RequiresSectionsPresent`.
 #[test]
 fn test_close_requires_sections_present() {
     let (mut core, _dir) = make_core();
 
     let id = core
-        .open_chapter("t3a-chapter", "ytk-canonical-v1")
+        .open_chapter("t3a-chapter", "journal-mcp-canonical-v1")
         .expect("open_chapter should succeed");
 
     core.append_section(&id, "Verified", "cargo test -p journal: 12 PASS [実測]")
@@ -224,7 +224,7 @@ fn test_close_requires_sections_non_empty() {
     let (mut core, _dir) = make_core();
 
     let id = core
-        .open_chapter("t3b-chapter", "ytk-canonical-v1")
+        .open_chapter("t3b-chapter", "journal-mcp-canonical-v1")
         .expect("open_chapter should succeed");
 
     // Append Verified with empty body.
@@ -257,7 +257,7 @@ fn test_close_requires_sections_non_empty() {
 // T4 — hook keyword_detect
 // ---------------------------------------------------------------------------
 
-/// T4 — keyword_detect hook on the `Decided` section in `ytk-canonical-v1`.
+/// T4 — keyword_detect hook on the `Decided` section in `journal-mcp-canonical-v1`.
 ///
 /// The built-in schema declares:
 /// ```yaml
@@ -276,7 +276,7 @@ fn test_hook_keyword_detect() {
     let (mut core, _dir) = make_core();
 
     let id = core
-        .open_chapter("t4-chapter", "ytk-canonical-v1")
+        .open_chapter("t4-chapter", "journal-mcp-canonical-v1")
         .expect("open_chapter should succeed");
 
     // Append Verified first so the transition from open → appending fires.

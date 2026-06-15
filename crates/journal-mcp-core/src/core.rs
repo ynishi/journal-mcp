@@ -203,7 +203,7 @@ impl JournalCore {
     /// # Arguments
     ///
     /// * `name` — chapter identifier (e.g. `"2026-06-13"`).
-    /// * `schema_id` — registry key (e.g. `"ytk-canonical-v1"`).
+    /// * `schema_id` — registry key (e.g. `"journal-mcp-canonical-v1"`).
     ///
     /// # Errors
     ///
@@ -739,7 +739,7 @@ impl JournalCore {
     ///
     /// This is a facade over [`SchemaRegistry::load_from_yaml_str`] that avoids
     /// exposing the private `registry` field.  The returned value is the
-    /// registry key that was inserted (e.g. `"ytk-canonical-v1"`).
+    /// registry key that was inserted (e.g. `"journal-mcp-canonical-v1"`).
     ///
     /// # Arguments
     ///
@@ -771,7 +771,7 @@ impl JournalCore {
     ///
     /// # Arguments
     ///
-    /// * `key` — registry key (e.g. `"ytk-canonical-v1"`).
+    /// * `key` — registry key (e.g. `"journal-mcp-canonical-v1"`).
     pub fn schema_spec(&self, key: &str) -> Option<&crate::ChapterSchema> {
         self.registry.get(key)
     }
@@ -782,7 +782,7 @@ impl JournalCore {
 
     /// Parse a markdown file at `path` and import all chapters it contains.
     ///
-    /// Follows the **ytk-canonical-v1** line-based parsing rule:
+    /// Follows the **journal-mcp-canonical-v1** line-based parsing rule:
     /// - `## <heading>` starts a new chapter (chapter_id derived from heading text).
     /// - `### <heading>` starts a new section within the current chapter.
     /// - Content lines between headings are accumulated as section body text.
@@ -826,7 +826,7 @@ impl JournalCore {
             }
         })?;
 
-        // ── ytk-canonical-v1 line-based parser ──────────────────────────────
+        // ── journal-mcp-canonical-v1 line-based parser ──────────────────────────────
         // State: current chapter accumulator and section accumulator.
         struct SectionAcc {
             name: String,
@@ -979,7 +979,7 @@ impl JournalCore {
                 serde_json::json!({
                     "chapter_id": cid,
                     "chapter_name": ch.heading,
-                    "schema_id": "ytk-canonical-v1",
+                    "schema_id": "journal-mcp-canonical-v1",
                     "sections": sections_json,
                 })
             })
@@ -1171,10 +1171,10 @@ mod tests {
         });
 
         let id = core
-            .open_chapter("2026-06-14", "ytk-canonical-v1")
+            .open_chapter("2026-06-14", "journal-mcp-canonical-v1")
             .expect("open_chapter should succeed");
 
-        // Five required sections (schema: ytk-canonical-v1).
+        // Five required sections (schema: journal-mcp-canonical-v1).
         let sections = ["Verified", "Done", "Decided", "Not Done", "Issues touched"];
         for &s in &sections {
             core.append_section(&id, s, "content")
@@ -1221,7 +1221,7 @@ mod tests {
 
         // Open, fill required sections, and close a chapter.
         let id = core
-            .open_chapter("2026-06-14-explicit", "ytk-canonical-v1")
+            .open_chapter("2026-06-14-explicit", "journal-mcp-canonical-v1")
             .expect("open_chapter should succeed");
         let sections = ["Verified", "Done", "Decided", "Not Done", "Issues touched"];
         for &s in &sections {
@@ -1255,7 +1255,7 @@ mod tests {
 
     fn open_and_fill(core: &mut JournalCore, name: &str, close: bool) -> ChapterId {
         let id = core
-            .open_chapter(name, "ytk-canonical-v1")
+            .open_chapter(name, "journal-mcp-canonical-v1")
             .expect("open_chapter should succeed");
         let sections = ["Verified", "Done", "Decided", "Not Done", "Issues touched"];
         for &s in &sections {
@@ -1342,9 +1342,9 @@ mod tests {
         let (mut core, _dir) = make_core_for_test();
         // Use minimal-v1 schema which has a Progress section and no required sections for close.
         let id = core
-            .open_chapter("2026-06-14-prog", "ytk-canonical-v1")
+            .open_chapter("2026-06-14-prog", "journal-mcp-canonical-v1")
             .expect("open_chapter should succeed");
-        // ytk-canonical-v1 doesn't have Progress — use journal-daily-v1 or we can
+        // journal-mcp-canonical-v1 doesn't have Progress — use journal-daily-v1 or we can
         // just test that progress_of returns empty when the chapter has no Progress events.
         let progress = core.progress_of(&id).expect("progress_of should succeed");
         assert!(progress.is_empty(), "no Progress events appended yet");
@@ -1359,7 +1359,7 @@ mod tests {
     fn test_grep_chapters_finds_match() {
         let (mut core, _dir) = make_core_for_test();
         let id = core
-            .open_chapter("2026-06-14-grep", "ytk-canonical-v1")
+            .open_chapter("2026-06-14-grep", "journal-mcp-canonical-v1")
             .expect("open_chapter should succeed");
         core.append_section(&id, "Verified", "cargo test passes — unique-grep-token-42")
             .expect("append_section should succeed");

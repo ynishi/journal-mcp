@@ -22,18 +22,18 @@ use journal_mcp_core::{ChapterSchema, SchemaError, SchemaRegistry};
 fn test_parse_three_builtins_and_fetch() {
     let registry = SchemaRegistry::new().expect("new should succeed");
 
-    // ytk-canonical-v1
+    // journal-mcp-canonical-v1
     let ytk = registry
-        .get("ytk-canonical-v1")
-        .expect("ytk-canonical-v1 must exist");
-    assert_eq!(ytk.schema_id(), "ytk-canonical");
+        .get("journal-mcp-canonical-v1")
+        .expect("journal-mcp-canonical-v1 must exist");
+    assert_eq!(ytk.schema_id(), "journal-mcp-canonical");
     assert_eq!(ytk.version(), 1);
     assert!(ytk.sections().contains_key("Verified"));
     assert!(ytk.sections().contains_key("Not Done"));
     assert!(ytk.sections().contains_key("Issues touched"));
     assert!(ytk.sections().contains_key("Done"));
     assert!(ytk.sections().contains_key("Decided"));
-    // section_order must be non-empty for ytk-canonical
+    // section_order must be non-empty for journal-mcp-canonical
     assert!(!ytk.section_order().is_empty());
     assert_eq!(ytk.section_order()[0], "Verified");
     // initial state
@@ -58,7 +58,10 @@ fn test_parse_three_builtins_and_fetch() {
     // list() must cover all three keys
     let mut ids: Vec<&str> = registry.list();
     ids.sort();
-    assert_eq!(ids, vec!["madr-v1", "minimal-v1", "ytk-canonical-v1"]);
+    assert_eq!(
+        ids,
+        vec!["journal-mcp-canonical-v1", "madr-v1", "minimal-v1"]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +138,7 @@ sections:
 /// A project-local schema file with the same `schema_id` + `version` as a
 /// built-in must shadow the built-in (Crux invariant: L2 overrides L1).
 ///
-/// We write a modified `ytk-canonical` schema (description changed) into a
+/// We write a modified `journal-mcp-canonical` schema (description changed) into a
 /// tempdir and confirm the registry returns the L2 version, while an
 /// unrelated schema (`madr-v1`) is still served from L1.
 #[test]
@@ -144,9 +147,9 @@ fn test_project_local_overrides_builtin() -> Result<(), Box<dyn std::error::Erro
     let schemas_dir = dir.path().join(".journal").join("schemas");
     std::fs::create_dir_all(&schemas_dir)?;
 
-    // Write an override for ytk-canonical with a changed description.
+    // Write an override for journal-mcp-canonical with a changed description.
     let override_yaml = r#"
-schema_id: ytk-canonical
+schema_id: journal-mcp-canonical
 version: 1
 description: project-local override description
 states:
@@ -174,15 +177,18 @@ sections:
     append_policy: append-only-chain
 "#;
 
-    std::fs::write(schemas_dir.join("ytk_canonical_v1.yaml"), override_yaml)?;
+    std::fs::write(
+        schemas_dir.join("journal_mcp_canonical_v1.yaml"),
+        override_yaml,
+    )?;
 
     let registry = SchemaRegistry::with_project_local(dir.path())?;
 
-    // The L2 schema must be returned for ytk-canonical-v1.
+    // The L2 schema must be returned for journal-mcp-canonical-v1.
     let ytk = registry
-        .get("ytk-canonical-v1")
-        .expect("ytk-canonical-v1 must still exist");
-    assert_eq!(ytk.schema_id(), "ytk-canonical");
+        .get("journal-mcp-canonical-v1")
+        .expect("journal-mcp-canonical-v1 must still exist");
+    assert_eq!(ytk.schema_id(), "journal-mcp-canonical");
     assert_eq!(ytk.version(), 1);
     // The L2 override has only two sections; the original built-in has nine.
     // If the built-in were returned instead, this assertion would fail.
@@ -213,7 +219,7 @@ fn test_no_schemas_dir_still_returns_builtins() -> Result<(), Box<dyn std::error
 
     let registry = SchemaRegistry::with_project_local(dir.path())?;
 
-    assert!(registry.get("ytk-canonical-v1").is_some());
+    assert!(registry.get("journal-mcp-canonical-v1").is_some());
     assert!(registry.get("madr-v1").is_some());
     assert!(registry.get("minimal-v1").is_some());
 

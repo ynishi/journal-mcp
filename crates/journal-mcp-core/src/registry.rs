@@ -8,7 +8,7 @@
 //!
 //! # Zero-config guarantee (Crux invariant)
 //!
-//! Built-in schemas (`ytk-canonical-v1`, `madr-v1`, `minimal-v1`) are
+//! Built-in schemas (`journal-mcp-canonical-v1`, `madr-v1`, `minimal-v1`) are
 //! compiled into the binary via `rust-embed`. [`SchemaRegistry::new`] never
 //! reads from the filesystem and always succeeds when the binary is correctly
 //! built.
@@ -97,8 +97,8 @@ pub enum RegistryError {
 /// # Registry key format
 ///
 /// Keys follow the `"<schema_id>-v<version>"` pattern
-/// (e.g. `"ytk-canonical-v1"`).  This is distinct from the YAML
-/// `schema_id` field value (e.g. `"ytk-canonical"`).
+/// (e.g. `"journal-mcp-canonical-v1"`).  This is distinct from the YAML
+/// `schema_id` field value (e.g. `"journal-mcp-canonical"`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaRegistry {
     /// L1: built-in schemas embedded at compile time.
@@ -133,7 +133,7 @@ impl SchemaRegistry {
         Ok(SchemaRegistry { l1, l2 })
     }
 
-    /// Look up a schema by registry key (e.g. `"ytk-canonical-v1"`).
+    /// Look up a schema by registry key (e.g. `"journal-mcp-canonical-v1"`).
     ///
     /// L2 (project-local) takes precedence over L1 (built-in) for the same
     /// key. Returns `None` if neither layer contains the key.
@@ -164,7 +164,7 @@ impl SchemaRegistry {
     ///
     /// # Returns
     ///
-    /// The registry key that was inserted (e.g. `"ytk-canonical-v1"`).
+    /// The registry key that was inserted (e.g. `"journal-mcp-canonical-v1"`).
     ///
     /// # Errors
     ///
@@ -192,7 +192,11 @@ impl SchemaRegistry {
 
     /// Load the three built-in schemas from the compile-time embedded bytes.
     fn load_builtins() -> Result<HashMap<String, ChapterSchema>, RegistryError> {
-        const BUILTINS: &[&str] = &["ytk_canonical_v1.yaml", "madr_v1.yaml", "minimal_v1.yaml"];
+        const BUILTINS: &[&str] = &[
+            "journal_mcp_canonical_v1.yaml",
+            "madr_v1.yaml",
+            "minimal_v1.yaml",
+        ];
 
         let mut map = HashMap::new();
         for file_name in BUILTINS {

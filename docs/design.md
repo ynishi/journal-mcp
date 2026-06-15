@@ -5,9 +5,9 @@ author: しー + ytk
 
 本設計の核:
 - 本 module の本質要件は **「任意の Chapter State Machine + section schema を持てる generic 装置」**
-- Verified / Done / Decided / Not Done / Issues touched の 5 section は **default schema の 1 つ** = `ytk-canonical-v1` として配布、 任意の Journaling Entity 設計を Multi-Schema で並走可能
+- Verified / Done / Decided / Not Done / Issues touched の 5 section は **default schema の 1 つ** = `journal-mcp-canonical-v1` として配布、 任意の Journaling Entity 設計を Multi-Schema で並走可能
 - `JournalCore` は ChapterSchema parser + state transition engine + section policy enforcer のみ、 section 名は core に hardcode しない
-- ytk default 5 section 規律は schema registry の 1 entry (= `ytk-canonical-v1`) として §5.1 に literal で完全 inline 済、 外部 rule 文書を本 module 内から cross-ref しない
+- default canonical 5 section 規律は schema registry の 1 entry (= `journal-mcp-canonical-v1`) として §5.1 に literal で完全 inline 済、 外部 rule 文書を本 module 内から cross-ref しない
 - BP-4.4 Dendron schema.yml + BP-8.1 mdschema を主要採用
 - MCP tool に schema 操作 (`journal_schema_load` / `journal_schema_list` / `journal_schema_show`) を含む
 
@@ -20,7 +20,7 @@ Project の **正史** (= 判断 + 検証の流れ、 「再開・中断・路�
 - core は schema parser + state transition engine + EventLog + Projection だけを持ち、 **具体的な section 名 (Verified / Done / Decided / …) は core に hardcode しない**
 
 これにより、 任意の Journaling Entity 設計を Multi-Schema で並走できる:
-- ytk default (Verified / Done / Decided / Not Done / Issues touched) は `ytk-canonical-v1` schema として配布
+- default canonical (Verified / Done / Decided / Not Done / Issues touched) は `journal-mcp-canonical-v1` schema として配布
 - ADR-MADR (Context / Decision / Consequences) は `madr-v1` schema として配布
 - lab notebook (Hypothesis / Method / Result / Discussion) は `lab-v1` schema として配布
 - project ごとに schema 選択 / 上書き / 拡張可能
@@ -54,7 +54,7 @@ Project の **正史** (= 判断 + 検証の流れ、 「再開・中断・路�
 
 1. **Chapter = compound State Machine entity**: open → appending → closed の transition + section 集合の close 条件 (sections_present / sections_non_empty) 駆動。 persona-journal の flat entry も mini-app の flat row もこの compound entity を表現できない
 2. **Schema-driven section policy**: append-only-chain / append-only-log / append-once / replace-forbidden の 4 種を section ごとに宣言。 schema.yaml は mini-app にあるが entry-level、 section policy は本 module 独自
-3. **Multi-Schema 並走**: `ytk-canonical-v1` / `madr-v1` / `minimal-v1` / 将来の `lab-v1` 等を同一 project 内に混在可能、 chapter ごとに `chapter_meta.schema_id` で固定。 任意の Journaling Entity 設計 (ADR / lab notebook / 自作流派) を receiver project が自由に選べる generic 装置
+3. **Multi-Schema 並走**: `journal-mcp-canonical-v1` / `madr-v1` / `minimal-v1` / 将来の `lab-v1` 等を同一 project 内に混在可能、 chapter ごとに `chapter_meta.schema_id` で固定。 任意の Journaling Entity 設計 (ADR / lab notebook / 自作流派) を receiver project が自由に選べる generic 装置
 4. **Project-scoped canonical history**: mini-app issue (= 枝、 作業単位) / outline (= ナレッジ tree) / persona-journal (= persona 独白) のいずれとも **直交する time-series narrative layer**。 「判断 + 検証 + 再開」 の単一参照点として project 1 本に紐付く
 
 ### 1.5.3 配置判断 — standalone MCP 別立て (現時点) / lds 統合 (将来 path 保持)
@@ -108,7 +108,7 @@ JournalMcpServer   session_start(root)  [将来 lds 統合時は LdsServer sessi
    └── JournalCore
          │
          ├── SchemaRegistry (hierarchical resolve, BP-1.2)
-         │     ├── L1 built-in: ytk-canonical-v1 / madr-v1 / minimal-v1 (crate 同梱)
+         │     ├── L1 built-in: journal-mcp-canonical-v1 / madr-v1 / minimal-v1 (crate 同梱)
          │     ├── L2 project-local: {project_root}/.journal/schemas/*.yaml
          │     ├── resolve 順: L2 が同 schema_id を override > L1 fallback
          │     └── chapter は chapter_meta.schema_id で版を固定 (open 後の resolve は immutable)
@@ -147,16 +147,16 @@ JournalMcpServer   session_start(root)  [将来 lds 統合時は LdsServer sessi
 - **ChapterSchema = State Machine spec** が章の骨格を完全に決定
 - **core は schema 中立**: 「Verified を必須」 とか core に書かない、 schema が宣言する
 - **EventLog の event_type は schema 由来**: 'section_append:<section_name>' / 'state_transition:<from>→<to>' / 'close' 等、 schema が定義する vocabulary
-- **Projection は schema 込みで render**: FileProjection は default で `ytk-canonical-v1` の markdown layout、 madr-v1 / lab-v1 用には render template を schema 側に付ける
+- **Projection は schema 込みで render**: FileProjection は default で `journal-mcp-canonical-v1` の markdown layout、 madr-v1 / lab-v1 用には render template を schema 側に付ける
 
 ## 5. ChapterSchema (declarative YAML spec)
 
-### 5.1 `ytk-canonical-v1` (ytk default)
+### 5.1 `journal-mcp-canonical-v1` (default canonical)
 
 ```yaml
-schema_id: ytk-canonical
+schema_id: journal-mcp-canonical
 version: 1
-description: ytk default canonical history schema
+description: journal-mcp default canonical history schema
 
 states:
   - id: open
@@ -453,7 +453,7 @@ CREATE TRIGGER event_log_no_delete BEFORE DELETE ON event_log
       {
         "chapter_id": "<deterministic from name>",
         "chapter_name": "<h2 literal>",
-        "schema_id": "ytk-canonical-v1",
+        "schema_id": "journal-mcp-canonical-v1",
         "sections": [
           { "section_name": "<h3>", "body": "<literal>" }
         ]
@@ -493,7 +493,7 @@ render template は active schema の `render.file_projection` から取得し�
 - 任意の `ChapterSchema` (YAML 宣言) を受けて state transition + section policy + hooks を enforce
 - `EventLog` (SQLite) を canonical SoT、 複数 `JournalProjection` を read 側 dump として並走
 - MCP tool 経由で chapter open / append / close / schema load・list・show / projection attach・detach・rebuild
-- built-in schema として `ytk-canonical-v1` / `madr-v1` / `minimal-v1` を crate 内 embed
+- built-in schema として `journal-mcp-canonical-v1` / `madr-v1` / `minimal-v1` を crate 内 embed
 - project-local schema を `{project_root}/.journal/schemas/*.yaml` から runtime load
 
 ### 9.2 非機能要件 / Invariant
@@ -501,7 +501,7 @@ render template は active schema の `render.file_projection` から取得し�
 - **append-only invariant**: trait に全文上書き / section 削除 / row 削除 API を expose しない
 - **二層 immutability guard**: Rust trait sealed (BP-6.1) + SQLite trigger `BEFORE UPDATE/DELETE RAISE(ABORT)` (BP-3.2) の両方を強制
 - **schema 中立**: core に section 名を hardcode しない (`Verified` / `Decided` 等は schema 側 literal、 core は schema spec を実行するエンジン)
-- **format 互換性**: FileProjection は active schema の `render.file_projection` template に従い、 `ytk-canonical-v1` 適用時は既存 `workspace/journal.md` format と完全互換
+- **format 互換性**: FileProjection は active schema の `render.file_projection` template に従い、 `journal-mcp-canonical-v1` 適用時は既存 `workspace/journal.md` format と完全互換
 - **single-writer 前提**: multi-tenant / concurrent append は first cut 非 goal (§13)
 - **atomic dump**: tempfile + POSIX rename で原子的書き換え (Windows 動作は §13 非 goal)
 - **EventLog 完全性**: 全 Projection は EventLog 全 replay で再構築可能 (drift 概念を構造的に消す)
@@ -529,17 +529,17 @@ render template は active schema の `render.file_projection` から取得し�
 
 1. **standalone repo `journal-mcp` 起こす** — `~/projects/cc-x/journal-mcp/` に `crates/journal-mcp-core` (core library) + `crates/journal-mcp` (stdio MCP binary) の 2 crate workspace 構成
 2. **crate `journal-mcp-core` 中身** — Core 型 + EventLog (SQLite + trigger + ULID + chapter_meta) + ChapterSchema parser (YAML) + SchemaRegistry + sealed JournalProjection trait
-3. **built-in schema 同梱** — `ytk-canonical-v1` / `madr-v1` / `minimal-v1` を crate 内 embed
+3. **built-in schema 同梱** — `journal-mcp-canonical-v1` / `madr-v1` / `minimal-v1` を crate 内 embed
 4. **FileProjection 実装** — content-hash + chapter dirty marking + debounce rebuild + atomic write + schema 由来 render template
 5. **MCP tool 配線** — `crates/journal-mcp` で `journal_*` tool 群 (schema 操作 3 本含む) を `#[tool_router]` で expose、 stdio transport
-6. **dogfood** — local-develop-server / algocline / agent-profiles で `ytk-canonical-v1` 運用、 持ち越し宣言 hint を warn return で AI 側 self-check トリガー
+6. **dogfood** — local-develop-server / algocline / agent-profiles で `journal-mcp-canonical-v1` 運用、 持ち越し宣言 hint を warn return で AI 側 self-check トリガー
 7. **他 Projection opt-in** — Outline / MiniApp / Gh
 8. **schema 拡張機能** — schema inheritance / overlay (§13 非 goal からの昇格時、 別 issue)
 9. **lds 統合検討** — API / Projection / Schema 安定後、 `crates/journal-mcp-core` を lds repo に move + lds 側 MCP tool 配線、 standalone binary deprecate 判断 (別 issue、 §1.5.3 参照)
 
 ## 11. 既存運用との位置関係
 
-- ytk default (Verified / Done / Decided / Not Done / Issues touched + フォーマット / 配置 / 追記規律 / 禁止 / Adviser write 規律) は §5.1 の `ytk-canonical-v1` schema YAML に literal で完全に inline 済。 本 module が走る project では schema YAML が運用 SoT、 外部 rule 文書はそれを参照する narrative layer に降りる
+- default canonical (Verified / Done / Decided / Not Done / Issues touched + フォーマット / 配置 / 追記規律 / 禁止 / Adviser write 規律) は §5.1 の `journal-mcp-canonical-v1` schema YAML に literal で完全に inline 済。 本 module が走る project では schema YAML が運用 SoT、 外部 rule 文書はそれを参照する narrative layer に降りる
 - mini-app issue (= 枝、 作業単位 + 受入条件) は本 module の scope 外、 役割分担は維持
 - `tail` / `grep` / `progress_of` tool により journal.md 全 Read を構造的に不要化
 

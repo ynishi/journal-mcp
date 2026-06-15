@@ -701,7 +701,7 @@ impl EventLog {
     ///     {
     ///       "chapter_id": "<id>",
     ///       "chapter_name": "<h2 literal>",
-    ///       "schema_id": "ytk-canonical-v1",
+    ///       "schema_id": "journal-mcp-canonical-v1",
     ///       "sections": [{ "section_name": "<h3>", "body": "<literal>" }]
     ///     }
     ///   ]
@@ -759,7 +759,7 @@ impl EventLog {
             let schema_id = chapter
                 .get("schema_id")
                 .and_then(|v| v.as_str())
-                .unwrap_or("ytk-canonical-v1");
+                .unwrap_or("journal-mcp-canonical-v1");
 
             if chapter_id.is_empty() {
                 tracing::warn!("append_import: skipping chapter with empty chapter_id");
