@@ -24,6 +24,7 @@ tracing    = { workspace = true }
 tracing-subscriber = { workspace = true }
 rmcp       = { workspace = true }
 schemars   = { workspace = true }
+time       = { workspace = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]

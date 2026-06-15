@@ -55,6 +55,22 @@ The server writes to:
 - `<project_root>/workspace/.journal.db` (EventLog SQLite)
 - `<project_root>/workspace/journal.md` (FileProjection)
 
+**Path resolution rules (literal-fixed, no fallback):**
+
+Once `project_root` is resolved at startup, all server-managed paths are
+derived by literal `join` from it. No glob, mtime fallback, or backup-file
+auto-pickup logic exists:
+
+- `<project_root>/workspace/.journal.db` (EventLog SQLite) — literal-fixed
+- `<project_root>/workspace/.journal.db-wal` and `.journal.db-shm` (SQLite WAL companions) — literal-fixed
+- `<project_root>/workspace/journal.md` (FileProjection) — literal-fixed
+- `<project_root>/.journal/schemas` (project-local L2 schema dir) — literal-fixed
+
+If a backup-suffixed file (e.g. `.journal.db.bak.YYYYMMDD`) is the only file
+present, the server does **not** pick it up automatically; a fresh empty DB
+is created at the literal path on next startup. Use `mcp__journal__journal_info()`
+to inspect the resolved paths at runtime.
+
 ### 2.3 MCP client registration
 
 Add to `.mcp.json` (project-scope) or your user-global MCP config:
@@ -215,12 +231,33 @@ If an existing `.journal.db` is present (e.g. from a prior dogfood run),
 apply the [Dogfood Reset SOP](design.md#dogfood-reset-sop):
 
 ```bash
-# Stop the MCP client first (so SQLite handle is released)
+# Stop the MCP client first — Unix open file semantics: rename(2) does not invalidate the existing fd, so a running server keeps writing to the renamed file.
 mv workspace/.journal.db        workspace/.journal.db.bak.YYYYMMDD
 mv workspace/.journal.db-shm    workspace/.journal.db-shm.bak.YYYYMMDD
 mv workspace/.journal.db-wal    workspace/.journal.db-wal.bak.YYYYMMDD
 # Restart the MCP client (fresh empty DB will be created on next startup)
 ```
+
+**Why stop the client first (Unix open file semantics):**
+
+On Unix, `rename(2)` (and the equivalent `mv` shell command) updates the
+directory entry but does **not** invalidate any existing open file descriptor
+that was previously opened against the original path. The kernel identifies
+open files by inode, and the inode follows the renamed entry. A running
+journal-mcp server therefore keeps writing through its existing fd to the
+now-renamed `.journal.db.bak.YYYYMMDD` file, while the literal path
+`<project_root>/workspace/.journal.db` (see §2.2) is no longer touched by
+anyone. Skipping the stop step leaves the server in a state where new
+chapters land in the backup file rather than the fresh DB.
+
+This is not a bug in the server; the path resolution is literal-fixed by
+design (see §2.2). The mitigation is to follow the stop-before-mv SOP in
+the code block above, or to call `mcp__journal__journal_info()` to verify
+the resolved `db_path` before importing. On startup, the server also scans
+the workspace dir for stale `.journal.db.bak.*` / `.journal.db-wal.bak.*` /
+`.journal.db-shm.bak.*` files and emits a `tracing::warn!` line per match
+as an early-detection signal that the stop-before-mv SOP may have been
+skipped in a previous migration.
 
 ---
 

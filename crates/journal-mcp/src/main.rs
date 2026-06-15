@@ -301,6 +301,40 @@ struct ChapterListRow {
 }
 
 // ---------------------------------------------------------------------------
+// JournalInfoResult — return type for the `journal_info` diagnostic tool
+// ---------------------------------------------------------------------------
+
+/// Snapshot of the server's runtime state, returned by `journal_info`.
+///
+/// All path fields are absolute and resolved at server startup time.
+/// Consumers can use this to diagnose path resolution, confirm which
+/// database the server is using, and enumerate available schemas.
+#[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+pub struct JournalInfoResult {
+    /// Project root path resolved at server startup (canonicalized).
+    pub project_root: PathBuf,
+    /// Absolute path to the `.journal.db` file that the server is using.
+    /// Always `<project_root>/workspace/.journal.db` (literal-fixed, no fallback).
+    pub db_path: PathBuf,
+    /// `true` if `db_path` exists on the filesystem at the time `journal_info` is called.
+    pub db_exists: bool,
+    /// Absolute path to the WAL companion file (`-wal` suffix).
+    pub wal_path: PathBuf,
+    /// Absolute path to the shared-memory companion file (`-shm` suffix).
+    pub shm_path: PathBuf,
+    /// Project-local schema directory (`<project_root>/.journal/schemas`).
+    pub schema_registry_path: PathBuf,
+    /// All registered schema keys (L1 built-in ∪ L2 project-local, L2 wins, de-duplicated).
+    pub available_schemas: Vec<String>,
+    /// Crate version (e.g. `"0.1.0"`).
+    pub version: String,
+    /// Server startup time in RFC3339 (UTC).
+    pub startup_time: String,
+    /// `JOURNAL_PROJECT_ROOT` env var value at startup (if set).
+    pub env_journal_project_root: Option<PathBuf>,
+}
+
+// ---------------------------------------------------------------------------
 // JournalMcpServer
 // ---------------------------------------------------------------------------
 
@@ -312,7 +346,7 @@ struct ChapterListRow {
 ///
 /// # Crux invariants satisfied here
 ///
-/// * **Crux #1** (tool_router 一元 ServerHandler 配線): all 16 tools (ST6-1/ST6-2/ST6-3/ST7)
+/// * **Crux #1** (tool_router 一元 ServerHandler 配線): all 17 tools (ST6-1/ST6-2/ST6-3/ST7)
 ///   are registered in a single `#[tool_router] impl JournalMcpServer` block and
 ///   dispatched through `#[tool_handler] impl ServerHandler`.
 /// * **Crux #3** (stdio transport 固定配線): `main()` wires
@@ -334,6 +368,16 @@ pub struct JournalMcpServer {
     /// `journal.md` for that project.  Populated on the first tool call
     /// that supplies a non-default `project_root` argument.
     extra_cores: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<journal_mcp_core::JournalCore>>>>>,
+    /// Absolute path to the `.journal.db` file, captured at startup.
+    /// Used by `journal_info` to avoid repeating the path-construction literal.
+    db_path: PathBuf,
+    /// Absolute path to the project-local schema directory
+    /// (`<project_root>/.journal/schemas`), captured at startup.
+    schema_registry_path: PathBuf,
+    /// Server startup time formatted as RFC3339 (UTC), captured once in `build()`.
+    started_at: String,
+    /// Value of `JOURNAL_PROJECT_ROOT` env var at startup, if set.
+    env_journal_project_root: Option<PathBuf>,
 }
 
 impl JournalMcpServer {
@@ -367,18 +411,45 @@ impl JournalMcpServer {
     ///
     /// Returns an error if the schema registry or database cannot be opened.
     fn build(project_root: PathBuf, attach_file_projection: bool) -> anyhow::Result<Self> {
-        let core = Self::build_core(&project_root, attach_file_projection)?;
+        let db_dir = project_root.join("workspace");
+        // Scan for stale .bak.* files before opening the database.
+        let stale = Self::detect_stale_bak_files(&db_dir);
+        for p in &stale {
+            tracing::warn!(
+                target: "journal::startup",
+                path = ?p,
+                "stale .bak file detected, ensure stop-before-mv was followed in last migration (ignore if this backup is intentional)"
+            );
+        }
+
+        let (core, db_path) = Self::build_core(&project_root, attach_file_projection)?;
         // After build_core succeeds, the project_root (and its workspace
         // subdir) exists, so `canonicalize` resolves all symlinks (e.g. on
         // macOS where TempDir lives under `/var` → `/private/var`).  This
         // canonical form is what `resolve_core` compares against, so storing
         // it here makes the per-call override short-circuit work reliably.
         let canonical_root = std::fs::canonicalize(&project_root).unwrap_or(project_root);
+
+        let schema_registry_path = canonical_root.join(".journal").join("schemas");
+
+        let started_at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|e| {
+                tracing::warn!(target: "journal::startup", error = ?e, "failed to format startup time as RFC3339");
+                String::from("unknown")
+            });
+
+        let env_journal_project_root = std::env::var_os("JOURNAL_PROJECT_ROOT").map(PathBuf::from);
+
         Ok(Self {
             tool_router: Self::tool_router(),
             core: Arc::new(Mutex::new(core)),
             project_root: canonical_root,
             extra_cores: Arc::new(Mutex::new(HashMap::new())),
+            db_path,
+            schema_registry_path,
+            started_at,
+            env_journal_project_root,
         })
     }
 
@@ -396,7 +467,7 @@ impl JournalMcpServer {
     fn build_core(
         project_root: &Path,
         attach_file_projection: bool,
-    ) -> anyhow::Result<journal_mcp_core::JournalCore> {
+    ) -> anyhow::Result<(journal_mcp_core::JournalCore, std::path::PathBuf)> {
         let registry = journal_mcp_core::SchemaRegistry::with_project_local(project_root)?;
 
         let db_dir = project_root.join("workspace");
@@ -414,7 +485,7 @@ impl JournalMcpServer {
             core.add_projection(proj);
         }
 
-        Ok(core)
+        Ok((core, db_path))
     }
 
     /// Apply pagination (offset + limit) to a `Vec<T>`.
@@ -474,7 +545,7 @@ impl JournalMcpServer {
         if let Some(c) = extra.get(&canonical) {
             return Ok(c.clone());
         }
-        let core = Self::build_core(&canonical, true)?;
+        let (core, _db_path) = Self::build_core(&canonical, true)?;
         let handle = Arc::new(Mutex::new(core));
         extra.insert(canonical, handle.clone());
         Ok(handle)
@@ -499,6 +570,58 @@ impl JournalMcpServer {
         attach_file_projection: bool,
     ) -> anyhow::Result<Self> {
         Self::build(project_root, attach_file_projection)
+    }
+
+    /// Scan `db_dir` for stale backup files left by a previous migration.
+    ///
+    /// Returns every entry whose filename starts with one of the three known
+    /// backup prefixes: `.journal.db.bak.`, `.journal.db-wal.bak.`, or
+    /// `.journal.db-shm.bak.`.  Read errors are logged as warnings and an
+    /// empty `Vec` is returned so startup always continues.
+    pub(crate) fn detect_stale_bak_files(db_dir: &std::path::Path) -> Vec<PathBuf> {
+        const PREFIXES: &[&str] = &[
+            ".journal.db.bak.",
+            ".journal.db-wal.bak.",
+            ".journal.db-shm.bak.",
+        ];
+
+        let entries = match std::fs::read_dir(db_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(
+                    target: "journal::startup",
+                    error = ?e,
+                    dir = ?db_dir,
+                    "failed to scan workspace dir for stale .bak files"
+                );
+                return Vec::new();
+            }
+        };
+
+        let mut found = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "journal::startup",
+                        error = ?e,
+                        dir = ?db_dir,
+                        "failed to scan workspace dir for stale .bak files"
+                    );
+                    continue;
+                }
+            };
+            let file_name = entry.file_name();
+            let name = match file_name.to_str() {
+                Some(s) => s,
+                None => continue,
+            };
+            if PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
+                found.push(entry.path());
+            }
+        }
+        found
     }
 }
 
@@ -1260,6 +1383,60 @@ impl JournalMcpServer {
         let ids: Vec<&str> = imported.iter().map(|id| id.0.as_str()).collect();
         Ok(serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string()))
     }
+
+    /// Return server runtime state for diagnostic purposes.
+    ///
+    /// Read-only tool. Returns resolved paths, schema list, server version,
+    /// and startup timestamp. Useful for confirming which database the server
+    /// is using and diagnosing path resolution issues.
+    #[tool(
+        name = "journal_info",
+        description = "Return server runtime state (paths, schemas, version, startup time). \
+                       Read-only diagnostic tool; no side effects.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn journal_info(&self) -> Result<String, String> {
+        let db_path = self.db_path.clone();
+        let db_exists = db_path.exists();
+        let wal_path = {
+            let mut p = db_path.clone().into_os_string();
+            p.push("-wal");
+            PathBuf::from(p)
+        };
+        let shm_path = {
+            let mut p = db_path.clone().into_os_string();
+            p.push("-shm");
+            PathBuf::from(p)
+        };
+
+        let available_schemas: Vec<String> = {
+            let core = self.core.lock().unwrap();
+            core.schema_keys()
+        };
+
+        let result = JournalInfoResult {
+            project_root: self.project_root.clone(),
+            db_path,
+            db_exists,
+            wal_path,
+            shm_path,
+            schema_registry_path: self.schema_registry_path.clone(),
+            available_schemas,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            startup_time: self.started_at.clone(),
+            env_journal_project_root: self.env_journal_project_root.clone(),
+        };
+
+        serde_json::to_string(&result).map_err(|e| {
+            tracing::warn!(error = ?e, "journal_info serialization failed");
+            e.to_string()
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1416,20 +1593,20 @@ mod tests {
         assert!(workspace.exists(), "workspace should be created by new()");
     }
 
-    /// T3 (error path) — tool_router now returns exactly 16 tools after ST7.
+    /// T3 (error path) — tool_router now returns exactly 17 tools after ST7.
     ///
-    /// Updated from "exactly 15 tools" (ST3/ST6) to "exactly 16 tools" (ST7)
-    /// by adding `journal_import` as the 16th tool.
+    /// Updated from "exactly 16 tools" (ST7) to "exactly 17 tools" (journal_info)
+    /// by adding `journal_info` as the 17th tool.
     ///
-    /// Verifies Crux #1: all 16 tools are wired into the single `#[tool_router]` block.
+    /// Verifies Crux #1: all 17 tools are wired into the single `#[tool_router]` block.
     #[test]
-    fn test_st7_exactly_sixteen_tools() {
+    fn test_st7_exactly_seventeen_tools() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
         let server = make_server(&tmp);
         let count = server.tool_router.list_all().len();
         assert_eq!(
-            count, 16,
-            "ST7 tool_router should have exactly 16 tools (Crux #1), got {count}"
+            count, 17,
+            "ST7 tool_router should have exactly 17 tools (Crux #1), got {count}"
         );
     }
 
@@ -1536,7 +1713,7 @@ mod tests {
     // ST3 integration tests — Crux #1 final: 15 tool full registration assert
     // -----------------------------------------------------------------------
 
-    /// Canonical spelling of all 16 MCP tools in the tool_router (ST7 final).
+    /// Canonical spelling of all 17 MCP tools in the tool_router (ST7 final).
     ///
     /// This constant is the authoritative list.  Changing this list is a
     /// Crux #1 or Crux #2 violation and requires human review.
@@ -1562,22 +1739,24 @@ mod tests {
         "journal_projection_rebuild",
         // ST7: import tool (1)
         "journal_import",
+        // journal_info: diagnostic tool (1)
+        "journal_info",
     ];
 
-    /// T1 (property) — Crux #1 final: all 16 tools are registered in the
+    /// T1 (property) — Crux #1 final: all 17 tools are registered in the
     /// single `#[tool_router] impl JournalMcpServer` block.
     ///
     /// This is the primary acceptance test for ST7 as a whole.
     #[test]
-    fn test_all_sixteen_tools_registered() {
+    fn test_all_seventeen_tools_registered() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
         let server = make_server(&tmp);
         let tools = server.tool_router.list_all();
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert_eq!(
             tool_names.len(),
-            16,
-            "exactly 16 tools must be registered (Crux #1 ST7); got: {tool_names:?}"
+            17,
+            "exactly 17 tools must be registered (Crux #1 ST7); got: {tool_names:?}"
         );
         for &name in EXPECTED_TOOLS {
             assert!(
@@ -1873,5 +2052,99 @@ mod tests {
         let with_none = JournalMcpServer::paginate(v.clone(), None, Some(2));
         let with_zero = JournalMcpServer::paginate(v, Some(0), Some(2));
         assert_eq!(with_none, with_zero);
+    }
+
+    /// Verify that `JournalInfoResult` has all 9 expected fields and that all
+    /// path-typed fields are absolute paths.
+    #[test]
+    fn test_journal_info_return_shape() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        // Canonicalize the TempDir path (macOS: /var -> /private/var).
+        let canonical_root =
+            std::fs::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().to_path_buf());
+        let db_path = canonical_root.join("workspace").join(".journal.db");
+        let schema_registry_path = canonical_root.join(".journal").join("schemas");
+
+        let result = JournalInfoResult {
+            project_root: canonical_root.clone(),
+            db_path: db_path.clone(),
+            db_exists: db_path.exists(),
+            wal_path: {
+                let mut p = db_path.clone().into_os_string();
+                p.push("-wal");
+                PathBuf::from(p)
+            },
+            shm_path: {
+                let mut p = db_path.clone().into_os_string();
+                p.push("-shm");
+                PathBuf::from(p)
+            },
+            schema_registry_path: schema_registry_path.clone(),
+            available_schemas: vec!["journal-mcp-canonical-v1".to_string()],
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            startup_time: "2026-01-01T00:00:00Z".to_string(),
+            env_journal_project_root: None,
+        };
+
+        // All 9 fields must be present (compile-time: struct literal with all fields).
+        // Path-typed fields must be absolute.
+        assert!(
+            result.project_root.is_absolute(),
+            "project_root must be absolute, got: {:?}",
+            result.project_root
+        );
+        assert!(
+            result.db_path.is_absolute(),
+            "db_path must be absolute, got: {:?}",
+            result.db_path
+        );
+        assert!(
+            result.wal_path.is_absolute(),
+            "wal_path must be absolute, got: {:?}",
+            result.wal_path
+        );
+        assert!(
+            result.shm_path.is_absolute(),
+            "shm_path must be absolute, got: {:?}",
+            result.shm_path
+        );
+        assert!(
+            result.schema_registry_path.is_absolute(),
+            "schema_registry_path must be absolute, got: {:?}",
+            result.schema_registry_path
+        );
+        // version must be non-empty
+        assert!(!result.version.is_empty(), "version must be non-empty");
+        // startup_time must be non-empty
+        assert!(
+            !result.startup_time.is_empty(),
+            "startup_time must be non-empty"
+        );
+    }
+
+    /// Verify that `detect_stale_bak_files` returns entries for all three known
+    /// backup prefixes when such files are present in the scanned directory.
+    #[test]
+    fn test_detect_stale_bak_files_finds_three_prefixes() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let dir = tmp.path();
+
+        // Create one file per known prefix.
+        let names = [
+            ".journal.db.bak.20260615",
+            ".journal.db-wal.bak.20260615",
+            ".journal.db-shm.bak.20260615",
+        ];
+        for name in &names {
+            std::fs::write(dir.join(name), b"").expect("write bak stub must succeed");
+        }
+
+        let found = JournalMcpServer::detect_stale_bak_files(dir);
+        assert_eq!(
+            found.len(),
+            3,
+            "expected 3 stale .bak files, got: {:?}",
+            found
+        );
     }
 }
