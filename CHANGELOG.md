@@ -5,14 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — 2026-06-15
 
 ### Added
 
 - `crates/journal-mcp-core/src/projection/vector_sqlite.rs`:
   `SqliteVectorProjection` — persistent variant of
   [`VectorProjection`](crate::projection::vector) backed by a plain
-  SQLite `BLOB` column (v0.3.0 ε-2)
+  SQLite `BLOB` column (v0.2.0 ε-2)
   - **ε-2 scope**: persistent storage replacing ε-1's in-memory
     `BTreeMap` so embeddings survive process restarts.
   - **Plain SQLite (no extension)**: stores embeddings as f32
@@ -44,11 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `cosine_similarity` (in `vector` module) raised to
     `pub(super)` so the SQLite backend can reuse the same scorer as
     ε-1 — guarantees identical ranking semantics across backends.
-  - No new dependencies (uses existing rusqlite). Closes #4f024175
+  - No new dependencies (uses existing rusqlite). Closes #(internal tracker)
     partial (ε-2 surface; ε-3/ε-4 carry on the same issue).
 - `crates/journal-mcp-core/src/projection/vector.rs`: `VectorProjection`
   + `VectorClient` trait — embedding-based semantic search index
-  (v0.3.0 ε-1)
+  (v0.2.0 ε-1)
   - **ε-1 scope**: projection logic + `VectorClient` trait abstraction
     over the embedding-compute path + `VectorConfig` (dimension) +
     in-memory `BTreeMap<chapter_id, Vec<f32>>` store + cosine-similarity
@@ -84,7 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     search dimension-mismatch error, stable `name() == "vector"`,
     cosine_similarity hand-verified values.
   - No new dependencies (in-memory store + pure-Rust cosine).
-  - Closes #4f024175 partial (ε-1 surface; ε-2/ε-3/ε-4 carry on the
+  - Closes #(internal tracker) partial (ε-1 surface; ε-2/ε-3/ε-4 carry on the
     same issue's follow-up commits).
 - `crates/journal-mcp-core/src/projection/miniapp_client.rs`:
   `MiniAppCoreClient` — concrete [`MiniAppClient`] impl using
@@ -300,6 +300,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `journal.md` → EventLog (refs: commit `194df30`). Covers schema compliance
   verify, uniform-stub normalization, backup, import execution, rollback,
   and the new append protocol (anti-patterns + fail-loud recipe wrapper).
+
+### Deferred (carry to v0.3.0+)
+
+v0.2.0 release scope は journal-mcp 内の **storage primitive 層**
+(FTS5 + Json + γ-1 Outline trait + δ-1/δ-2 MiniApp + ε-1/ε-2 Vector
+storage) の完成を確定。 embedding 計算 (concrete embedder model)、 外部
+MCP 連携の concrete client、 handler-side wire-up はいずれも external
+layer 領分として v0.3.0+ で別途。
+
+- **γ-2**: `OutlineProjection` concrete `rmcp` client (γ-1 trait + mock
+  は v0.2.0 着地、 concrete impl が carry)。 outline-mcp 上流が
+  single-crate (SDK split crate 未公開) のため、 (a) inline rmcp client
+  を journal-mcp-core 側で wrap、 もしくは (c) 別 layer (外部 bridge crate
+  / 別 MCP server) で扱う 2 path を v0.3.0+ で再判定。 (issue: 別途
+  mini-app 起票)
+- **ε-3 CandleEmbedder**: `candle-core` + `tokenizers` + `hf-hub` +
+  `all-MiniLM-L6-v2` Metal accel の concrete `VectorClient` impl。
+  embedding 計算は journal-mcp 領分外、 external layer (別 crate / 別
+  MCP server / 利用側で任意 embedder を inject する path) で扱う方向。
+  v0.2.0 では ε-1 trait + ε-2 SQLite storage まで in-tree、 concrete
+  embedder は v0.3.0+ で再検討。 (issue (internal tracker))
+- **ε-4 17th MCP tool `journal_semantic_search`**: ε-3 sibling、 同上
+  carry。 storage primitive は v0.2.0 で揃ったので handler-side で
+  user-supplied embedder を受けて search する path は v0.3.0+ で。
+  (issue (internal tracker))
+- **handler wire-up**: FTS5 / Json / Vector の各 projection を
+  default-attached する handler-side 配線、 および `journal_grep` の
+  FTS5 fast path への切り替えは v0.3.0+ で別途。
 
 ## [0.1.0] — 2026-06-14
 
