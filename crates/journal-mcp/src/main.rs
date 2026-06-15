@@ -164,7 +164,7 @@ pub struct JournalGrepParams {
     pub project_root: Option<String>,
 }
 
-/// Parameters for `journal_chapter_list` (no fields — lists all chapters).
+/// Parameters for `journal_chapter_list` (supports pagination).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct JournalChapterListParams {
     /// Optional per-call project_root override.  When `None`, the
@@ -175,6 +175,19 @@ pub struct JournalChapterListParams {
     /// to the default behaviour.
     #[serde(default)]
     pub project_root: Option<String>,
+    /// Maximum number of chapters to return, applied after `offset`.
+    /// When `None` (default), all remaining chapters are returned —
+    /// preserves the pre-pagination behaviour.  Newest chapters first
+    /// (i.e. position 0 is the most recently opened chapter).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Number of chapters to skip from the start of the list, applied
+    /// before `limit`.  When `None` (default), no chapters are skipped.
+    /// Newest chapters first, so `offset=0` starts at the most recently
+    /// opened chapter.  An `offset` greater than or equal to the total
+    /// chapter count yields an empty result (not an error).
+    #[serde(default)]
+    pub offset: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +415,25 @@ impl JournalMcpServer {
         }
 
         Ok(core)
+    }
+
+    /// Apply pagination (offset + limit) to a `Vec<T>`.
+    ///
+    /// Semantics:
+    /// - `offset = None` (or `Some(0)`) → no items are skipped.
+    /// - `limit = None` → return all items from `offset` onwards.
+    /// - `offset >= len` → empty `Vec<T>` (not an error).
+    ///
+    /// Used by `journal_chapter_list` to page large chapter sets without
+    /// exceeding MCP client output size limits.  Decoupled from the tool
+    /// handler so the slicing semantics are unit-testable without spinning
+    /// up a full `JournalCore` + `tokio` runtime.
+    fn paginate<T>(items: Vec<T>, offset: Option<usize>, limit: Option<usize>) -> Vec<T> {
+        items
+            .into_iter()
+            .skip(offset.unwrap_or(0))
+            .take(limit.unwrap_or(usize::MAX))
+            .collect()
     }
 
     /// Resolve the `JournalCore` handle for the given optional per-call `project_root`.
@@ -948,7 +980,14 @@ impl JournalMcpServer {
                 e.to_string()
             })?;
 
-            chapters
+            // Apply pagination: skip(offset).take(limit).
+            // - offset default = 0 (no skipping)
+            // - limit default = usize::MAX (return all remaining)
+            // Both omitted = full list (backward-compatible with pre-pagination
+            // behaviour).  offset >= total yields an empty Vec, not an error.
+            let paginated = Self::paginate(chapters, params.offset, params.limit);
+
+            paginated
                 .into_iter()
                 .map(|replay| {
                     let decided_summary = replay
@@ -1776,5 +1815,63 @@ mod tests {
             Arc::ptr_eq(&handle, &server.core),
             "Path that canonicalizes to default project_root must return the default core"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // journal_chapter_list pagination tests (limit / offset)
+    // -----------------------------------------------------------------------
+
+    /// T1 (property) — `paginate(_, None, None)` returns the full input
+    /// unchanged (backward-compat with pre-pagination behaviour).
+    #[test]
+    fn test_paginate_omitted_returns_all() {
+        let v = vec![1, 2, 3, 4, 5];
+        let r = JournalMcpServer::paginate(v.clone(), None, None);
+        assert_eq!(r, v);
+    }
+
+    /// T2 (boundary) — `paginate(_, None, Some(N))` returns the first N items.
+    #[test]
+    fn test_paginate_limit_only() {
+        let v = vec![1, 2, 3, 4, 5];
+        let r = JournalMcpServer::paginate(v, None, Some(2));
+        assert_eq!(r, vec![1, 2]);
+    }
+
+    /// T3 (boundary) — `paginate(_, Some(K), None)` skips K items and returns
+    /// the rest.
+    #[test]
+    fn test_paginate_offset_only() {
+        let v = vec![1, 2, 3, 4, 5];
+        let r = JournalMcpServer::paginate(v, Some(2), None);
+        assert_eq!(r, vec![3, 4, 5]);
+    }
+
+    /// T4 (property) — Both `offset` and `limit` compose: skip K then take N.
+    #[test]
+    fn test_paginate_limit_and_offset() {
+        let v = vec![1, 2, 3, 4, 5];
+        let r = JournalMcpServer::paginate(v, Some(1), Some(2));
+        assert_eq!(r, vec![2, 3]);
+    }
+
+    /// T5 (error path) — `offset >= len` yields an empty `Vec`, not an error.
+    #[test]
+    fn test_paginate_offset_overflow_yields_empty() {
+        let v: Vec<i32> = vec![1, 2, 3];
+        let r = JournalMcpServer::paginate(v, Some(10), Some(5));
+        assert!(
+            r.is_empty(),
+            "offset >= len must yield an empty Vec; got: {r:?}"
+        );
+    }
+
+    /// T6 (boundary) — `offset = 0` is equivalent to omitting `offset`.
+    #[test]
+    fn test_paginate_offset_zero_same_as_none() {
+        let v = vec![1, 2, 3];
+        let with_none = JournalMcpServer::paginate(v.clone(), None, Some(2));
+        let with_zero = JournalMcpServer::paginate(v, Some(0), Some(2));
+        assert_eq!(with_none, with_zero);
     }
 }

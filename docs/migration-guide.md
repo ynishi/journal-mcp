@@ -378,9 +378,13 @@ The following limitations are known and tracked separately:
   lazily opens (or reuses a cached) `JournalCore` rooted at the given path
   and executes the call against it. Multi-project workflows no longer need
   per-project MCP client restarts.
-- **`journal_chapter_list` large response**: for projects with many chapters
-  (100+), the full chapter list can exceed MCP client output size limits.
-  Pagination / chunked retrieval is a candidate enhancement.
+- ~~**`journal_chapter_list` large response**~~ — **implemented in
+  [Unreleased]** (see CHANGELOG). `journal_chapter_list` now accepts
+  optional `limit: Option<usize>` and `offset: Option<usize>` parameters
+  for pagination. When both are omitted, the full chapter list is returned
+  (backward-compatible). For large projects (100+ chapters), page through
+  with `limit=20, offset=0`, `offset=20`, etc. Newest chapters first;
+  `offset >= total` yields an empty list (not an error).
 
 ---
 

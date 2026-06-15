@@ -31,6 +31,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     override-creates-separate-db, override-caches-handle, canonical-matches-default
   - Backward-compatible: existing MCP clients that omit `project_root` from
     tool calls see no behaviour change. Closes #b4a5b61b.
+- `journal_chapter_list`: pagination via optional `limit` / `offset`
+  parameters on `JournalChapterListParams`
+  - `limit: Option<usize>` — maximum number of chapters to return,
+    applied after `offset`.  `None` (default) returns all remaining
+    chapters (= pre-pagination behaviour).
+  - `offset: Option<usize>` — number of chapters to skip from the start.
+    `None` (default) skips none.  `offset >= total` yields an empty list,
+    not an error.
+  - Newest chapters first (i.e. `offset=0` is the most recently opened
+    chapter).
+  - Internal helper `JournalMcpServer::paginate(items, offset, limit)`
+    extracted so the slicing semantics are unit-testable without spinning
+    up a full `JournalCore` + `tokio` runtime.
+  - 6 new unit tests covering `paginate` semantics: omitted-returns-all,
+    limit-only, offset-only, limit-and-offset, offset-overflow-yields-empty,
+    offset-zero-same-as-none.
+  - Backward-compatible: existing MCP clients that omit both fields see no
+    behaviour change. Closes #98123835.
 - `JournalMcpServer.project_root` is now canonicalized at construction time
   (was: raw `PathBuf` as supplied). This makes the `resolve_core`
   short-circuit reliable on platforms where the supplied path differs from
