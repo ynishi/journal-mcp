@@ -20,4 +20,21 @@ rust-embed = { workspace = true }
 tracing    = { workspace = true }
 tempfile   = "3"
 
+# Optional: δ-2 MiniAppCoreClient (in-process SDK-direct path).
+# Enabled via the `miniapp-core` feature flag. Brings in mini-app-core
+# (transport-agnostic CRUD library, crates.io) + tokio for sync↔async
+# bridging + serde_yaml_bw for mini-app-core's schema parser.
+mini-app-core   = { version = "0.11", optional = true }
+serde_yaml_bw   = { version = "2.5", optional = true }
+tokio           = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+
+[features]
+# Enables `MiniAppCoreClient` — concrete `MiniAppClient` impl that talks
+# to a mini-app `Store` directly (no IPC, no MCP wire). See
+# `crates/journal-mcp-core/src/projection/miniapp_client.rs`.
+miniapp-core = ["dep:mini-app-core", "dep:serde_yaml_bw", "dep:tokio"]
+
 [dev-dependencies]
+# Test runtime for the `miniapp-core` feature path: tokio is needed both
+# at compile time (test annotations) and at runtime (block_on bridge).
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

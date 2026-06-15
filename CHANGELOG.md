@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `crates/journal-mcp-core/src/projection/miniapp_client.rs`:
+  `MiniAppCoreClient` — concrete [`MiniAppClient`] impl using
+  `mini-app-core` directly (no IPC, no MCP wire) (v0.3.0 δ-2)
+  - **Feature flag**: gated behind the optional `miniapp-core` Cargo
+    feature so callers that do not need the MiniApp projection do not
+    pay the dependency cost.
+  - **SDK-direct path**: routes the 4 `MiniAppClient` trait methods to
+    the corresponding `mini-app_core::store::Store` async APIs via
+    in-process function calls. No `rmcp` child-process spawn, no
+    JSON-RPC over stdio. Latency ~ns vs ~ms for the alternative rmcp
+    stdio path.
+  - **Adapter mechanism rationale**: `mini-app-core` is published on
+    crates.io as a "transport-agnostic CRUD library" so SDK-direct is
+    the project's intended consumption mode. (The sibling γ-2
+    OutlineProjection rmcp client uses a different mechanism because
+    outline-mcp's core crate is not published.)
+  - **Sync ↔ async bridge**: `block_on(future)` wraps
+    `tokio::task::block_in_place` + `Handle::current().block_on` so the
+    sync trait methods can drive the async `Store` APIs from inside an
+    existing `#[tokio::main]` multi-threaded runtime.
+  - **`schema_ensure`**: no-op (mini-app-core's `Store::open` already
+    created the table with the supplied schema at `MiniAppCoreClient::open`
+    construction time; mini-app-core does not have a separate
+    "ensure table exists" API).
+  - **Optional dependencies** (gated by the feature flag):
+    `mini-app-core 0.11`, `serde_yaml_bw 2.5` (mini-app-core's schema
+    parser), `tokio` with `rt-multi-thread` + `macros` features.
+  - 4 new integration tests (gated by feature): round-trip
+    create/query/update through real SQLite; query returns None when
+    absent; schema_ensure is a no-op; open returns Err on malformed
+    YAML.
+  - Closes #2b562589 (δ-2 wire-up; δ-1 trait + generic + mock landed in
+    b855a5e).
+
 ### Changed
 
 - `rusqlite` workspace dependency bumped from `0.31` (→ `libsqlite3-sys 0.28`)
