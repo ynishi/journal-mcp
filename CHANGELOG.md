@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `crates/journal-mcp/src/main.rs`: per-call `project_root` override on all 16
+  MCP tools (multi-project workflow support)
+  - Every `Journal*Params` struct gains a `#[serde(default)] pub project_root:
+    Option<String>` field — `None` (or omitted) preserves the existing
+    startup-time `JOURNAL_PROJECT_ROOT` (or `current_dir()`) behaviour;
+    `Some(path)` routes the tool call to a per-project `JournalCore` rooted at
+    the given path
+  - `JournalMcpServer` gains a lazy cache `extra_cores:
+    Arc<Mutex<HashMap<PathBuf, Arc<Mutex<JournalCore>>>>>` keyed by
+    canonicalized project_root; the startup-time core is reused for `None` and
+    for paths that canonicalize to the startup-time root (short-circuit)
+  - `JournalMcpServer::build_core(project_root, attach_file_projection)` —
+    static helper that builds a fresh `JournalCore` rooted at the given path;
+    shared by the startup-time constructor and the per-call lazy-cache
+    populator (`resolve_core`)
+  - `JournalMcpServer::resolve_core(project_root: Option<&str>)` — returns the
+    `Arc<Mutex<JournalCore>>` handle for the tool call (default core for
+    `None`, cache lookup or lazy-build for `Some(path)`)
+  - 4 new unit tests covering `resolve_core` semantics: default-passthrough,
+    override-creates-separate-db, override-caches-handle, canonical-matches-default
+  - Backward-compatible: existing MCP clients that omit `project_root` from
+    tool calls see no behaviour change. Closes #b4a5b61b.
+- `JournalMcpServer.project_root` is now canonicalized at construction time
+  (was: raw `PathBuf` as supplied). This makes the `resolve_core`
+  short-circuit reliable on platforms where the supplied path differs from
+  its canonical form (e.g. macOS `/var` → `/private/var` for `TempDir`).
+
 ### Changed (BREAKING)
 
 - Default schema registry key renamed from `ytk-canonical-v1` to `journal-mcp-canonical-v1`
@@ -16,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schema ID literal to `open_chapter` / `schema_load` must update the string. Historical
   CHANGELOG entries below (v0.1.0) retain the original `ytk-canonical-v1` literal because
   that was the published API at that time.
+
+### Added (documentation)
+
+- `docs/migration-guide.md`: comprehensive Migration Guide for file-based
+  `journal.md` → EventLog (refs: commit `194df30`). Covers schema compliance
+  verify, uniform-stub normalization, backup, import execution, rollback,
+  and the new append protocol (anti-patterns + fail-loud recipe wrapper).
 
 ## [0.1.0] — 2026-06-14
 

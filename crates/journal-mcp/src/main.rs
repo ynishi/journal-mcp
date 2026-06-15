@@ -13,7 +13,8 @@
 //! See `docs/design.md §6` for the full tool table and `§10 Step 5` for the
 //! stdio transport specification.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rmcp::{
@@ -37,6 +38,12 @@ pub struct JournalOpenChapterParams {
     pub name: String,
     /// Schema ID that governs this chapter (e.g. `"journal-mcp-canonical-v1"`).
     pub schema_id: String,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 /// Parameters for `journal_append_section`.
@@ -48,6 +55,12 @@ pub struct JournalAppendSectionParams {
     pub section_name: String,
     /// Body text of the section row.
     pub body: String,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 /// Parameters for `journal_append_progress`.
@@ -57,6 +70,12 @@ pub struct JournalAppendProgressParams {
     pub chapter_id: String,
     /// Single progress line to append (e.g. `"step 3 done"`).
     pub line: String,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 /// Parameters for `journal_close_chapter`.
@@ -64,6 +83,12 @@ pub struct JournalAppendProgressParams {
 pub struct JournalCloseChapterParams {
     /// Target chapter ID to close.
     pub chapter_id: String,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -75,17 +100,38 @@ pub struct JournalCloseChapterParams {
 pub struct JournalSchemaLoadParams {
     /// YAML literal conforming to the ChapterSchema format (see `docs/design.md §5`).
     pub yaml: String,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 /// Parameters for `journal_schema_list` (no fields — lists all schemas).
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct JournalSchemaListParams {}
+pub struct JournalSchemaListParams {
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time `JOURNAL_PROJECT_ROOT` (or `current_dir()`) is used.
+    /// When `Some(path)`, the server lazily opens (or reuses a cached)
+    /// `JournalCore` rooted at the given path and executes this call
+    /// against it.  Backward-compatible: omitting the field falls back
+    /// to the default behaviour.
+    #[serde(default)]
+    pub project_root: Option<String>,
+}
 
 /// Parameters for `journal_schema_show`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct JournalSchemaShowParams {
     /// Registry key to look up (e.g. `"journal-mcp-canonical-v1"`).
     pub key: String,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 /// Parameters for `journal_tail`.
@@ -93,6 +139,12 @@ pub struct JournalSchemaShowParams {
 pub struct JournalTailParams {
     /// Maximum number of chapters to return (default 10).
     pub n: Option<usize>,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 /// Parameters for `journal_grep`.
@@ -104,11 +156,26 @@ pub struct JournalGrepParams {
     pub since: Option<i64>,
     /// Optional end filter: only chapters opened at or before this Unix epoch ms.
     pub until: Option<i64>,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 /// Parameters for `journal_chapter_list` (no fields — lists all chapters).
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct JournalChapterListParams {}
+pub struct JournalChapterListParams {
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time `JOURNAL_PROJECT_ROOT` (or `current_dir()`) is used.
+    /// When `Some(path)`, the server lazily opens (or reuses a cached)
+    /// `JournalCore` rooted at the given path and executes this call
+    /// against it.  Backward-compatible: omitting the field falls back
+    /// to the default behaviour.
+    #[serde(default)]
+    pub project_root: Option<String>,
+}
 
 // ---------------------------------------------------------------------------
 // Subtask-3 parameter structs — open_chapters / progress_of / projection 3
@@ -116,13 +183,28 @@ pub struct JournalChapterListParams {}
 
 /// Parameters for `journal_open_chapters` (no fields — lists all open chapters).
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct JournalOpenChaptersParams {}
+pub struct JournalOpenChaptersParams {
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time `JOURNAL_PROJECT_ROOT` (or `current_dir()`) is used.
+    /// When `Some(path)`, the server lazily opens (or reuses a cached)
+    /// `JournalCore` rooted at the given path and executes this call
+    /// against it.  Backward-compatible: omitting the field falls back
+    /// to the default behaviour.
+    #[serde(default)]
+    pub project_root: Option<String>,
+}
 
 /// Parameters for `journal_progress_of`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct JournalProgressOfParams {
     /// Target chapter ID whose Progress section events to return.
     pub chapter_id: String,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 /// Parameters for `journal_projection_attach`.
@@ -130,6 +212,12 @@ pub struct JournalProgressOfParams {
 pub struct JournalProjectionAttachParams {
     /// Stable name of the projection to attach (e.g. `"file"`).
     pub name: String,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 /// Parameters for `journal_projection_detach`.
@@ -137,6 +225,12 @@ pub struct JournalProjectionAttachParams {
 pub struct JournalProjectionDetachParams {
     /// Stable name of the projection to detach (e.g. `"file"`).
     pub name: String,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 /// Parameters for `journal_projection_rebuild`.
@@ -144,6 +238,12 @@ pub struct JournalProjectionDetachParams {
 pub struct JournalProjectionRebuildParams {
     /// Stable name of the projection to rebuild (e.g. `"file"`).
     pub name: String,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +256,12 @@ pub struct JournalImportParams {
     /// Filesystem path of the markdown file to import (absolute or relative to
     /// `JOURNAL_PROJECT_ROOT`).
     pub path: String,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -206,10 +312,15 @@ pub struct JournalMcpServer {
     tool_router: ToolRouter<Self>,
     /// Shared mutable journal core — single writer, `std::sync::Mutex` is
     /// sufficient because we never `.await` while holding the lock guard.
+    /// Default core, rooted at the startup-time `project_root`.
     core: Arc<Mutex<journal_mcp_core::JournalCore>>,
-    /// Project root directory; retained for tools that need filesystem context.
-    #[allow(dead_code)]
+    /// Startup-time project root (used when a tool call omits `project_root`).
     project_root: PathBuf,
+    /// Per-project lazy cache.  Keyed by canonicalized project_root path,
+    /// value is an `Arc<Mutex<JournalCore>>` that owns the `.journal.db` /
+    /// `journal.md` for that project.  Populated on the first tool call
+    /// that supplies a non-default `project_root` argument.
+    extra_cores: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<journal_mcp_core::JournalCore>>>>>,
 }
 
 impl JournalMcpServer {
@@ -243,7 +354,37 @@ impl JournalMcpServer {
     ///
     /// Returns an error if the schema registry or database cannot be opened.
     fn build(project_root: PathBuf, attach_file_projection: bool) -> anyhow::Result<Self> {
-        let registry = journal_mcp_core::SchemaRegistry::with_project_local(&project_root)?;
+        let core = Self::build_core(&project_root, attach_file_projection)?;
+        // After build_core succeeds, the project_root (and its workspace
+        // subdir) exists, so `canonicalize` resolves all symlinks (e.g. on
+        // macOS where TempDir lives under `/var` → `/private/var`).  This
+        // canonical form is what `resolve_core` compares against, so storing
+        // it here makes the per-call override short-circuit work reliably.
+        let canonical_root = std::fs::canonicalize(&project_root).unwrap_or(project_root);
+        Ok(Self {
+            tool_router: Self::tool_router(),
+            core: Arc::new(Mutex::new(core)),
+            project_root: canonical_root,
+            extra_cores: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Build a fresh `JournalCore` rooted at the given `project_root`.
+    ///
+    /// Shared by the startup-time constructor (`build`) and the per-call
+    /// lazy-cache populator (`resolve_core`).  Each call opens an independent
+    /// SQLite handle at `{project_root}/workspace/.journal.db` and (optionally)
+    /// attaches a `FileProjection` rendering to
+    /// `{project_root}/workspace/journal.md`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the schema registry or database cannot be opened.
+    fn build_core(
+        project_root: &Path,
+        attach_file_projection: bool,
+    ) -> anyhow::Result<journal_mcp_core::JournalCore> {
+        let registry = journal_mcp_core::SchemaRegistry::with_project_local(project_root)?;
 
         let db_dir = project_root.join("workspace");
         // Ensure the workspace directory exists so SQLite can create the DB file.
@@ -260,11 +401,51 @@ impl JournalMcpServer {
             core.add_projection(proj);
         }
 
-        Ok(Self {
-            tool_router: Self::tool_router(),
-            core: Arc::new(Mutex::new(core)),
-            project_root,
-        })
+        Ok(core)
+    }
+
+    /// Resolve the `JournalCore` handle for the given optional per-call `project_root`.
+    ///
+    /// * `None` — return a clone of the startup-time default `core` handle.
+    /// * `Some(path)` — canonicalize the path; if it matches the default
+    ///   `project_root`, return the default handle (no extra DB open).  Otherwise
+    ///   look up the path in the per-project lazy cache (`extra_cores`); on cache
+    ///   miss, build a fresh `JournalCore` rooted at that path, insert it into
+    ///   the cache, and return its handle.  `FileProjection` is always attached
+    ///   for cached cores.
+    ///
+    /// Concurrency: holds the `extra_cores` HashMap lock only across the
+    /// insert/lookup; the lock guard is dropped before returning the cloned
+    /// `Arc<Mutex<JournalCore>>` handle to the caller, so per-`JournalCore`
+    /// operations do not serialise across projects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `build_core` fails for the requested path.
+    fn resolve_core(
+        &self,
+        project_root: Option<&str>,
+    ) -> anyhow::Result<Arc<Mutex<journal_mcp_core::JournalCore>>> {
+        let Some(pr) = project_root else {
+            return Ok(self.core.clone());
+        };
+        let pr_path = PathBuf::from(pr);
+        let canonical = std::fs::canonicalize(&pr_path).unwrap_or(pr_path);
+        // Short-circuit: if it canonicalizes to the default project_root, reuse the default core.
+        if canonical == self.project_root {
+            return Ok(self.core.clone());
+        }
+        let mut extra = self
+            .extra_cores
+            .lock()
+            .map_err(|e| anyhow::anyhow!("extra_cores mutex poisoned: {e}"))?;
+        if let Some(c) = extra.get(&canonical) {
+            return Ok(c.clone());
+        }
+        let core = Self::build_core(&canonical, true)?;
+        let handle = Arc::new(Mutex::new(core));
+        extra.insert(canonical, handle.clone());
+        Ok(handle)
     }
 
     /// Test-only constructor with explicit FileProjection control.
@@ -321,7 +502,10 @@ impl JournalMcpServer {
         let id = {
             // SAFETY: Mutex::lock().unwrap() — poisoned Mutex means the process is
             // in an undefined state; abort is acceptable here.
-            let mut core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let mut core = core_handle.lock().unwrap();
             core.open_chapter(&params.name, &params.schema_id)
                 .map_err(|e| {
                     tracing::warn!(error = ?e, "journal_open_chapter failed");
@@ -352,7 +536,10 @@ impl JournalMcpServer {
         let chapter_id = journal_mcp_core::ChapterId(params.chapter_id);
         let warnings = {
             // SAFETY: see journal_open_chapter
-            let mut core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let mut core = core_handle.lock().unwrap();
             core.append_section(&chapter_id, &params.section_name, &params.body)
                 .map_err(|e| {
                     tracing::warn!(error = ?e, "journal_append_section failed");
@@ -389,7 +576,10 @@ impl JournalMcpServer {
         let chapter_id = journal_mcp_core::ChapterId(params.chapter_id);
         let warnings = {
             // SAFETY: see journal_open_chapter
-            let mut core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let mut core = core_handle.lock().unwrap();
             core.append_progress(&chapter_id, &params.line)
                 .map_err(|e| {
                     tracing::warn!(error = ?e, "journal_append_progress failed");
@@ -426,7 +616,10 @@ impl JournalMcpServer {
         let chapter_id = journal_mcp_core::ChapterId(params.chapter_id);
         {
             // SAFETY: see journal_open_chapter
-            let mut core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let mut core = core_handle.lock().unwrap();
             core.close_chapter(&chapter_id).map_err(|e| {
                 tracing::warn!(error = ?e, "journal_close_chapter failed");
                 e.to_string()
@@ -467,7 +660,10 @@ impl JournalMcpServer {
     ) -> Result<String, String> {
         let key = {
             // SAFETY: see journal_open_chapter
-            let mut core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let mut core = core_handle.lock().unwrap();
             core.load_schema_yaml(&params.yaml).map_err(|e| {
                 tracing::warn!(error = ?e, "journal_schema_load failed");
                 e.to_string()
@@ -498,11 +694,14 @@ impl JournalMcpServer {
     )]
     async fn journal_schema_list(
         &self,
-        _params: Parameters<JournalSchemaListParams>,
+        Parameters(params): Parameters<JournalSchemaListParams>,
     ) -> Result<String, String> {
         let keys = {
             // SAFETY: see journal_open_chapter
-            let core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let core = core_handle.lock().unwrap();
             core.schema_keys()
         }; // guard drops here
            // SAFETY: Vec<String> serialisation is infallible.
@@ -537,7 +736,10 @@ impl JournalMcpServer {
     ) -> Result<String, String> {
         let json = {
             // SAFETY: see journal_open_chapter
-            let core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let core = core_handle.lock().unwrap();
             match core.schema_spec(&params.key) {
                 Some(spec) => {
                     // ChapterSchema does not derive Serialize; build a JSON
@@ -611,7 +813,10 @@ impl JournalMcpServer {
         let n = params.n.unwrap_or(10);
         let chapters = {
             // SAFETY: see journal_open_chapter
-            let core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let core = core_handle.lock().unwrap();
             core.tail_chapters(n).map_err(|e| {
                 tracing::warn!(error = ?e, n, "journal_tail failed");
                 e.to_string()
@@ -652,7 +857,10 @@ impl JournalMcpServer {
         // `until`.  All within the Mutex guard scope (no await across the lock).
         let json = {
             // SAFETY: see journal_open_chapter
-            let core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let core = core_handle.lock().unwrap();
 
             // 1. Collect chapter IDs that pass the `since` filter.
             let since_ids = core.chapter_ids(params.since).map_err(|e| {
@@ -726,11 +934,14 @@ impl JournalMcpServer {
     )]
     async fn journal_chapter_list(
         &self,
-        _params: Parameters<JournalChapterListParams>,
+        Parameters(params): Parameters<JournalChapterListParams>,
     ) -> Result<String, String> {
         let rows = {
             // SAFETY: see journal_open_chapter
-            let core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let core = core_handle.lock().unwrap();
             // tail_chapters with a large n gives all chapters (newest first)
             let chapters = core.tail_chapters(usize::MAX).map_err(|e| {
                 tracing::warn!(error = ?e, "journal_chapter_list: tail_chapters failed");
@@ -799,11 +1010,14 @@ impl JournalMcpServer {
     )]
     async fn journal_open_chapters(
         &self,
-        _params: Parameters<JournalOpenChaptersParams>,
+        Parameters(params): Parameters<JournalOpenChaptersParams>,
     ) -> Result<String, String> {
         let ids = {
             // SAFETY: see journal_open_chapter
-            let core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let core = core_handle.lock().unwrap();
             core.open_chapter_ids().map_err(|e| {
                 tracing::warn!(error = ?e, "journal_open_chapters failed");
                 e.to_string()
@@ -838,7 +1052,10 @@ impl JournalMcpServer {
         let chapter_id = journal_mcp_core::ChapterId(params.chapter_id);
         let entries = {
             // SAFETY: see journal_open_chapter
-            let core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let core = core_handle.lock().unwrap();
             core.progress_of(&chapter_id).map_err(|e| {
                 tracing::warn!(error = ?e, chapter_id = %chapter_id, "journal_progress_of failed");
                 e.to_string()
@@ -950,7 +1167,10 @@ impl JournalMcpServer {
     ) -> Result<String, String> {
         {
             // SAFETY: see journal_open_chapter
-            let mut core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let mut core = core_handle.lock().unwrap();
             core.rebuild_projection(&params.name).map_err(|e| {
                 tracing::warn!(error = ?e, name = %params.name, "journal_projection_rebuild failed");
                 e.to_string()
@@ -988,7 +1208,10 @@ impl JournalMcpServer {
     ) -> Result<String, String> {
         let imported = {
             // SAFETY: see journal_open_chapter
-            let mut core = self.core.lock().unwrap();
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let mut core = core_handle.lock().unwrap();
             let path = std::path::PathBuf::from(&params.path);
             core.import_chapter(&path).map_err(|e| {
                 tracing::warn!(error = ?e, path = %params.path, "journal_import failed");
@@ -1460,6 +1683,98 @@ mod tests {
         assert!(
             result.is_err(),
             "new_with_config should return Err when workspace dir cannot be created"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-call project_root override tests (multi-project workflow support)
+    // -----------------------------------------------------------------------
+
+    /// T1 (property) — `resolve_core(None)` returns the startup-time default
+    /// core handle (Arc::ptr_eq).
+    #[test]
+    fn test_resolve_core_default_returns_startup_core() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let server = make_server(&tmp);
+        let handle = server
+            .resolve_core(None)
+            .expect("resolve_core(None) should succeed");
+        assert!(
+            Arc::ptr_eq(&handle, &server.core),
+            "resolve_core(None) must return the startup-time default core"
+        );
+    }
+
+    /// T2 (boundary) — `resolve_core(Some(path))` rooted at a different project
+    /// lazily creates a separate `JournalCore` and a `.journal.db` file at
+    /// `{path}/workspace/.journal.db`.
+    #[test]
+    fn test_resolve_core_override_creates_separate_db() {
+        let tmp_default = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let tmp_other = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let server = make_server(&tmp_default);
+
+        let other_path = tmp_other
+            .path()
+            .to_str()
+            .expect("temp dir path should be UTF-8");
+        let handle = server
+            .resolve_core(Some(other_path))
+            .expect("resolve_core(Some(other)) should succeed");
+
+        assert!(
+            !Arc::ptr_eq(&handle, &server.core),
+            "override must return a distinct core handle, not the default core"
+        );
+
+        let other_db = tmp_other.path().join("workspace").join(".journal.db");
+        assert!(
+            other_db.exists(),
+            "override must create {{path}}/workspace/.journal.db; checked: {other_db:?}"
+        );
+    }
+
+    /// T3 (property) — Repeated `resolve_core(Some(same_path))` returns the
+    /// **cached** handle (same Arc pointer), not a fresh instance.
+    #[test]
+    fn test_resolve_core_override_caches_handle() {
+        let tmp_default = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let tmp_other = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let server = make_server(&tmp_default);
+        let path = tmp_other
+            .path()
+            .to_str()
+            .expect("temp dir path should be UTF-8");
+
+        let h1 = server
+            .resolve_core(Some(path))
+            .expect("first call should succeed");
+        let h2 = server
+            .resolve_core(Some(path))
+            .expect("second call should succeed");
+        assert!(
+            Arc::ptr_eq(&h1, &h2),
+            "repeated resolve_core(Some(same path)) must return the cached handle"
+        );
+    }
+
+    /// T4 (canonical short-circuit) — Path that canonicalizes to the default
+    /// project_root returns the default core (no extra cache entry).
+    #[test]
+    fn test_resolve_core_canonical_matches_default() {
+        let tmp_default = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let server = make_server(&tmp_default);
+        let default_path_str = tmp_default
+            .path()
+            .to_str()
+            .expect("temp dir path should be UTF-8");
+
+        let handle = server
+            .resolve_core(Some(default_path_str))
+            .expect("resolve_core should succeed");
+        assert!(
+            Arc::ptr_eq(&handle, &server.core),
+            "Path that canonicalizes to default project_root must return the default core"
         );
     }
 }

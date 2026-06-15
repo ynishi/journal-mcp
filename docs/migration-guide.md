@@ -371,10 +371,13 @@ append entirely. Fail-loud is the only safe deprecation.
 
 The following limitations are known and tracked separately:
 
-- **No per-call `project_root` override**: `JOURNAL_PROJECT_ROOT` is fixed at
-  server startup. Multi-project workflows require one MCP client launch per
-  project root. A per-call override (e.g. an optional `project_root` argument
-  on each tool) is a candidate enhancement.
+- ~~**No per-call `project_root` override**~~ — **implemented in [Unreleased]**
+  (see CHANGELOG). All 16 tools now accept an optional `project_root: Option<String>`
+  argument. When omitted, the startup-time `JOURNAL_PROJECT_ROOT` (or
+  `current_dir()`) is used (backward-compatible). When supplied, the server
+  lazily opens (or reuses a cached) `JournalCore` rooted at the given path
+  and executes the call against it. Multi-project workflows no longer need
+  per-project MCP client restarts.
 - **`journal_chapter_list` large response**: for projects with many chapters
   (100+), the full chapter list can exceed MCP client output size limits.
   Pagination / chunked retrieval is a candidate enhancement.
