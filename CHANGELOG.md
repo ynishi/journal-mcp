@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `crates/journal-mcp/src/main.rs`: `journal_info` — 17th MCP tool
+  (diagnostic, read-only)
+  - Returns a snapshot of the server's runtime state: `project_root` /
+    `db_path` / `db_exists` / `wal_path` / `shm_path` /
+    `schema_registry_path` / `available_schemas` / `version` /
+    `startup_time` (RFC3339) / `env_journal_project_root`.
+  - All path fields are absolute and resolved at server startup
+    (literal-fixed by design, no fallback); `db_path` is always
+    `<project_root>/workspace/.journal.db`.
+  - Read-only, no side effects.
+  - `JournalMcpServer` struct gains 4 fields (`db_path` /
+    `schema_registry_path` / `started_at` / `env_journal_project_root`);
+    `build_core` signature changes to return `(JournalCore, PathBuf)`
+    so callers can persist the resolved `db_path` without literal
+    duplication.
+  - 2 new unit tests: `test_journal_info_return_shape` (9-field shape
+    + absolute path assert), `test_detect_stale_bak_files_finds_three_prefixes`
+    (TempDir + 3 .bak file placement → 3 hits assert).
+  - Tool count invariant updated 16 → 17:
+    `test_st7_exactly_sixteen_tools` / `test_all_sixteen_tools_registered`
+    renamed to `_seventeen_` variants with assert updated;
+    `EXPECTED_TOOLS` const array extended.
+- `crates/journal-mcp/src/main.rs`: stale `.journal.db.bak.*` startup
+  warning — workspace dir scan emits `tracing::warn!` per stale
+  `.journal.db.bak.*` / `.journal.db-wal.bak.*` / `.journal.db-shm.bak.*`
+  file as an early-detection signal that the stop-before-mv SOP may
+  have been skipped in a previous migration. Path resolution logic
+  itself is literal-fixed by design; this scan is purely a diagnostic.
 - `crates/journal-mcp-core/src/projection/vector_sqlite.rs`:
   `SqliteVectorProjection` — persistent variant of
   [`VectorProjection`](crate::projection::vector) backed by a plain
@@ -130,6 +158,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from building. No source changes were required in `journal-mcp-core` /
   `journal-mcp`; all 64 existing unit + integration + doc tests pass
   unchanged on `rusqlite 0.32`.
+- Workspace `[workspace.dependencies]` gains `time = { version = "0.3",
+  features = ["formatting"] }` — required by `journal_info` for the
+  RFC3339 `startup_time` field. The workspace declaration keeps the
+  dependency consistently versioned across all member crates.
 
 ### Added
 
@@ -300,6 +332,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `journal.md` → EventLog (refs: commit `194df30`). Covers schema compliance
   verify, uniform-stub normalization, backup, import execution, rollback,
   and the new append protocol (anti-patterns + fail-loud recipe wrapper).
+- `docs/migration-guide.md` §2.2 — Path resolution rules clarified
+  (literal-fixed by design, no fallback) + schema registry path listed
+  as a first-class server-resolved location alongside `project_root` /
+  `db_path` / `wal_path` / `shm_path`.
+- `docs/migration-guide.md` §4 — Why-stop-the-client-first paragraph
+  explaining Unix open file semantics: `rename(2)` does not invalidate
+  an existing file descriptor; the inode follows the renamed entry, so
+  any running journal-mcp server must be stopped before a `mv` of the
+  `.journal.db` family or the server keeps writing into the renamed
+  inode rather than the new path.
 
 ### Deferred (carry to v0.3.0+)
 
