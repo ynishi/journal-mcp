@@ -1,0 +1,45 @@
+# mini-app schema for `journal_chapter` table.
+#
+# Auto-deployed by `MiniAppProjection::rebuild_chapter` on the first sync
+# when the target table is absent.  Hand-edits to this file ship in the
+# next journal-mcp release.
+
+title: journal_chapter
+description: |
+  Per-chapter metadata projected from the journal-mcp EventLog by the
+  MiniAppProjection (v0.3.0 δ).  One row per chapter (keyed by chapter_id),
+  enabling SQL-style cross-table joins with mini-app issue / commit / other
+  tables in downstream tools.
+
+fields:
+  - name: chapter_id
+    type: string
+    required: true
+
+  - name: project_label
+    type: string
+    required: true
+
+  - name: schema_id
+    type: string
+    required: true
+
+  - name: current_state
+    type: string
+    required: true
+
+  - name: opened_at
+    type: integer
+    required: true
+
+  - name: closed_at
+    type: integer
+    required: false
+
+  - name: decided_summary
+    type: string
+    required: false
+
+  - name: issue_refs
+    type: array
+    required: false

@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `crates/journal-mcp-core/src/projection/miniapp.rs`: `MiniAppProjection`
+  + `MiniAppClient` trait — sync chapter metadata to a mini-app table
+  (v0.3.0 δ-1)
+  - **δ-1 scope**: projection logic + `MiniAppClient` trait abstraction +
+    `MiniAppConfig` (table_name / project_label) + embedded
+    `miniapp_schema.yaml` for auto-deploy + 8 unit tests using a
+    `MockMiniAppClient` recorder
+  - **δ-2 deferred to follow-up commit on the same topic branch
+    (sibling to γ-2)**: the concrete `RmcpStdioMiniAppClient` that spawns
+    the real `mini-app-mcp` binary and routes calls over stdio via the
+    `rmcp` client primitives. Both δ-2 and γ-2 (Outline) share the same
+    rmcp child-process wrapper pattern.
+  - Row mapping: one row per chapter (keyed by `chapter_id`) with fields
+    `chapter_id / project_label / schema_id / current_state / opened_at /
+    closed_at / decided_summary / issue_refs[]`. `decided_summary` is the
+    first non-empty line of the `Decided` section; `issue_refs` is the
+    list of canonical UUIDs (8-4-4-4-12 hex pattern) extracted from the
+    `Issues touched` section body. UUID extraction uses a manual
+    sliding-window scanner so the crate does not pick up a `regex`
+    dependency.
+  - `rebuild_chapter` pipeline: lazy `schema_ensure` on first call
+    (idempotent for subsequent calls) → build payload (chapter metadata +
+    decided_summary + issue_refs) → query existing row by `chapter_id` →
+    `row_update` (if exists) or `row_create` (if absent) → clear dirty
+    entry on success.
+  - 8 new unit tests covering: schema_ensure-called-once, fresh-routes-to-create,
+    existing-routes-to-update, decided_summary extraction, issue_refs
+    UUID extraction, mark_dirty/rebuild dirty-set lifecycle,
+    multi-rebuild idempotent routing, custom config forwarded,
+    scan_uuids no false positives on commit hashes / wrong-width hex.
+  - Closes #2b562589 (δ-1 surface; δ-2 wire-up tracked separately on
+    the same issue's follow-up commit).
 - `crates/journal-mcp-core/src/projection/outline.rs`: `OutlineProjection`
   + `OutlineClient` trait — sync chapters as nodes in an Outline-MCP book
   (v0.3.0 γ-1)
