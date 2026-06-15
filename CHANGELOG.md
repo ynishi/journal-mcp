@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `crates/journal-mcp-core/src/projection/json.rs`: `JsonProjection` —
+  machine-readable JSON dump of all chapters + events (v0.3.0 β)
+  - Output: `workspace/journal.json` (or caller-supplied path) with a
+    stable envelope: `{schema_version: 1, chapters: [{chapter_id, schema_id,
+    current_state, opened_at, closed_at, events: [...]}]}` for jq /
+    downstream-agent / CI consumption
+  - Chapters emitted in lexicographic chapter_id order (matches
+    FileProjection's date-slug → chronological ordering)
+  - Atomic write via tempfile + rename: readers observe either complete
+    previous content or complete new content, never partial
+  - `mark_dirty` is a no-op (full snapshot per rebuild covers the dirty
+    chapter implicitly)
+  - `rebuild_chapter(replay)` updates the in-memory `BTreeMap` then re-writes
+    the entire envelope to disk
+  - Pretty-printed (2-space indent) for human readability; size overhead vs
+    compact JSON is small relative to event payload size
+  - 7 new unit tests (new-does-not-touch-fs, valid-envelope-round-trip,
+    idempotency, multi-chapter-lex-ordering, replace-existing-chapter,
+    auto-create-parent-dir, mark_dirty-no-op)
+  - No new dependencies (`serde_json` already in tree). Closes #75991975.
 - `crates/journal-mcp-core/src/projection/fts5.rs`: `FTS5Projection` — SQLite
   FTS5 full-text search index over chapter section bodies (v0.3.0 α)
   - SQLite virtual table `journal_fts` co-located in `.journal.db`, indexed
