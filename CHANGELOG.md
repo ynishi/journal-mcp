@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `rusqlite` workspace dependency bumped from `0.31` (→ `libsqlite3-sys 0.28`)
+  to `0.32` (→ `libsqlite3-sys 0.30`). Required for the upcoming
+  `MiniAppCoreClient` (v0.3.0 δ-2, SDK-direct path) which pulls in
+  `mini-app-core 0.11` — itself depending on `rusqlite 0.32`. Without the
+  bump, `libsqlite3-sys` link conflict prevents the `miniapp-core` feature
+  from building. No source changes were required in `journal-mcp-core` /
+  `journal-mcp`; all 64 existing unit + integration + doc tests pass
+  unchanged on `rusqlite 0.32`.
+
 ### Added
 
 - `crates/journal-mcp-core/src/projection/miniapp.rs`: `MiniAppProjection`
