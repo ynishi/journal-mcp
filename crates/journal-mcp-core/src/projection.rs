@@ -34,8 +34,10 @@
 //! [`EventLog`]: crate::EventLog
 
 pub mod file;
+pub mod fts5;
 
 pub use file::FileProjection;
+pub use fts5::FTS5Projection;
 
 // ---------------------------------------------------------------------------
 // Sealed module (Crux: Sealed trait 外部 impl 禁止境界)
@@ -60,14 +62,21 @@ pub(crate) mod private {
 
 /// Errors returned by [`JournalProjection`] methods.
 ///
-/// Currently only wraps [`std::io::Error`], which is reserved for the file-IO
-/// path that `FileProjection` will use in ST5.  ST4 does not produce IO errors
-/// at runtime.
+/// Wraps the underlying failure source.  File-based projections (e.g.
+/// [`FileProjection`]) produce [`ProjectionError::Io`]; SQLite-backed
+/// projections (e.g. [`FTS5Projection`]) produce [`ProjectionError::Sql`].
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectionError {
-    /// An IO error, returned by file-based projections (ST5+).
+    /// An IO error, returned by file-based projections.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// A SQLite operation error, returned by SQLite-backed projections.
+    #[error("sqlite error: {0}")]
+    Sql(#[from] rusqlite::Error),
+    /// A JSON serialization or deserialization error, returned by projections
+    /// that parse event payloads.
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 // ---------------------------------------------------------------------------

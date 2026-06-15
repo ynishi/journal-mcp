@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `crates/journal-mcp-core/src/projection/fts5.rs`: `FTS5Projection` — SQLite
+  FTS5 full-text search index over chapter section bodies (v0.3.0 α)
+  - SQLite virtual table `journal_fts` co-located in `.journal.db`, indexed
+    by the `trigram` tokenizer so the FTS5 `MATCH` operator behaves like
+    SQL `LIKE '%pattern%'` substring search (drop-in semantic compat with
+    the existing `LIKE`-based `journal_grep` linear scan); ≥100x speedup
+    expected at 1000+ chapters
+  - `FTS5Projection::open(db_path)` — idempotent constructor
+  - `FTS5Projection::search(pattern)` — substring search helper; pattern
+    length must be ≥3 characters (trigram tokenizer requirement)
+  - Implements the sealed `JournalProjection` trait
+    (`name() == "fts5"` / `mark_dirty` / `rebuild_chapter`); only
+    `section_append` events are indexed
+  - Multi-connection access against the EventLog DB is WAL-safe
+  - 7 new unit tests (open idempotency, rebuild-then-search, rebuild
+    idempotency, mark_dirty removal, non-section-event skip, multi-chapter
+    isolation, Japanese substring match via trigram)
+  - `ProjectionError::Sql(rusqlite::Error)` and
+    `ProjectionError::Json(serde_json::Error)` variants added
+  - Handler-side wire-up (routing `journal_grep` through the FTS5 fast
+    path when attached) lands in a follow-up commit alongside the
+    default-attached set decision (master issue bc3b7c79 / design doc §3).
+    Closes #7429275b (projection implementation surface; handler wire-up
+    tracked separately).
 - `crates/journal-mcp/src/main.rs`: per-call `project_root` override on all 16
   MCP tools (multi-project workflow support)
   - Every `Journal*Params` struct gains a `#[serde(default)] pub project_root:
