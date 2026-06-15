@@ -227,6 +227,20 @@ impl SchemaRegistry {
             let key = format!("{}-v{}", schema.schema_id(), schema.version());
             map.insert(key, schema);
         }
+
+        // BREAKING change migration alias (a15d180 v0.2.0 rename).
+        // `ytk-canonical-v1` was the v0.1.0 published schema key; the rename
+        // to `journal-mcp-canonical-v1` orphaned EventLogs created with the
+        // old key — `journal_projection_rebuild` and other replay paths that
+        // look up the schema by the stored registry key returned
+        // `RegistryError::BuiltinMissing` for historical chapters. Register
+        // the old key as an alias entry pointing to the same `ChapterSchema`
+        // so v0.1 EventLogs replay cleanly. New chapters should still use
+        // `journal-mcp-canonical-v1` (canonical key).
+        if let Some(schema) = map.get("journal-mcp-canonical-v1").cloned() {
+            map.insert("ytk-canonical-v1".to_string(), schema);
+        }
+
         Ok(map)
     }
 

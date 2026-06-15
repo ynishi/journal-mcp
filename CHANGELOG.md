@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-06-15
+
+### Fixed
+
+- `crates/journal-mcp-core/src/registry.rs`: `SchemaRegistry` gains
+  back-compat alias `ytk-canonical-v1` → `journal-mcp-canonical-v1`
+  (BREAKING change migration for v0.1.0 → v0.2.0 schema rename a15d180)
+  - **Why**: existing EventLogs created with v0.1.0 store
+    `chapter_meta.schema_id` rows with `"ytk-canonical-v1"`. After the
+    v0.2.0 rename, `journal_projection_rebuild` (and any other replay
+    path that looks up the schema by the stored registry key) returned
+    `RegistryError::BuiltinMissing` for these historical chapters,
+    breaking FileProjection rebuild on v0.1 EventLogs.
+  - **Fix**: `load_builtins()` registers `ytk-canonical-v1` as an alias
+    entry pointing to the same `ChapterSchema` as
+    `journal-mcp-canonical-v1`. Existing replay / projection paths
+    resolve historical chapters; new chapters should still use
+    `journal-mcp-canonical-v1` (canonical key).
+  - **`list()` impact**: `SchemaRegistry::list()` now returns 4 keys
+    (`journal-mcp-canonical-v1` / `madr-v1` / `minimal-v1` /
+    `ytk-canonical-v1`); the alias is intentionally listed so callers
+    can discover the back-compat path. Existing
+    `test_parse_three_builtins_and_fetch` assertion updated to 4 keys.
+  - 1 new integration test:
+    `test_ytk_canonical_v1_alias_resolves` — asserts the alias returns
+    the same `ChapterSchema` (== equality + same `schema_id` field +
+    same version + same sections) as the canonical key.
+  - Backward-compatible: v0.1 EventLogs replay cleanly without any
+    user-side schema migration (no `chapter_meta.schema_id` rewrite,
+    no project-local schema placement needed).
+
 ## [0.2.0] — 2026-06-15
 
 ### Added

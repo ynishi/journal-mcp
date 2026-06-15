@@ -55,13 +55,48 @@ fn test_parse_three_builtins_and_fetch() {
     assert!(minimal.sections().is_empty());
     assert!(minimal.section_order().is_empty());
 
-    // list() must cover all three keys
+    // list() must cover all three canonical keys plus the back-compat alias
+    // `ytk-canonical-v1` (a15d180 v0.2.0 rename migration, see registry.rs).
     let mut ids: Vec<&str> = registry.list();
     ids.sort();
     assert_eq!(
         ids,
-        vec!["journal-mcp-canonical-v1", "madr-v1", "minimal-v1"]
+        vec![
+            "journal-mcp-canonical-v1",
+            "madr-v1",
+            "minimal-v1",
+            "ytk-canonical-v1",
+        ]
     );
+}
+
+// ---------------------------------------------------------------------------
+// T1b: ytk-canonical-v1 alias resolves to journal-mcp-canonical-v1
+// ---------------------------------------------------------------------------
+
+/// `ytk-canonical-v1` (the v0.1.0 published registry key, renamed in v0.2.0
+/// by commit a15d180) must resolve to the same `ChapterSchema` as the new
+/// canonical key `journal-mcp-canonical-v1`. This back-compat alias allows
+/// `journal_projection_rebuild` and other replay paths to resolve historical
+/// chapters whose `chapter_meta.schema_id` field still stores the old key.
+#[test]
+fn test_ytk_canonical_v1_alias_resolves() {
+    let registry = SchemaRegistry::new().expect("new should succeed");
+
+    let aliased = registry
+        .get("ytk-canonical-v1")
+        .expect("ytk-canonical-v1 alias must resolve to journal-mcp-canonical-v1");
+    let canonical = registry
+        .get("journal-mcp-canonical-v1")
+        .expect("journal-mcp-canonical-v1 must exist");
+
+    // The alias entry must point to the same ChapterSchema as the canonical
+    // key — same schema_id field, same version, same sections, etc.
+    assert_eq!(aliased, canonical);
+    assert_eq!(aliased.schema_id(), "journal-mcp-canonical");
+    assert_eq!(aliased.version(), 1);
+    assert!(aliased.sections().contains_key("Verified"));
+    assert!(aliased.sections().contains_key("Issues touched"));
 }
 
 // ---------------------------------------------------------------------------
