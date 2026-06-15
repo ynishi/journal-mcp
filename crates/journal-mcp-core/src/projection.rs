@@ -36,10 +36,12 @@
 pub mod file;
 pub mod fts5;
 pub mod json;
+pub mod outline;
 
 pub use file::FileProjection;
 pub use fts5::FTS5Projection;
 pub use json::JsonProjection;
+pub use outline::{OutlineClient, OutlineConfig, OutlineProjection};
 
 // ---------------------------------------------------------------------------
 // Sealed module (Crux: Sealed trait 外部 impl 禁止境界)

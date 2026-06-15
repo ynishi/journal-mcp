@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `crates/journal-mcp-core/src/projection/outline.rs`: `OutlineProjection`
+  + `OutlineClient` trait — sync chapters as nodes in an Outline-MCP book
+  (v0.3.0 γ-1)
+  - **γ-1 scope**: projection logic + `OutlineClient` trait abstraction +
+    `OutlineConfig` (book_slug / parent_node_path) + 7 unit tests
+    using a `MockOutlineClient` recorder
+  - **γ-2 deferred to follow-up commit on the same topic branch**: the
+    concrete `RmcpStdioOutlineClient` that spawns the real `outline-mcp`
+    binary and routes calls over stdio via the `rmcp` client primitives.
+    The trait-based split keeps γ-1 self-contained and unit-testable
+    without requiring a running `outline-mcp` process.
+  - Node mapping: `Outline book = config.book_slug` → parent node
+    (`config.parent_node_path`, default `"Chapters"`) → child node per
+    chapter, slug = `chapter_id`. Body is rendered Markdown (H1 chapter
+    heading + H2 section headings + section bodies).
+  - `rebuild_chapter` pipeline: render body → `node_query` for existing
+    node → `node_update` (if exists) or `node_create` (if absent) → clear
+    dirty entry on success. Idempotent across repeated rebuilds.
+  - `mark_dirty` queues the chapter ID into an internal `HashSet`;
+    callers may batch-flush via repeated `rebuild_chapter` calls.
+  - Non-`section_append` events (open / close / append_progress / import)
+    are skipped during body rendering — only section bodies feed the
+    human-readable node body.
+  - 7 new unit tests covering: fresh-chapter-routes-to-create,
+    existing-chapter-routes-to-update, mark_dirty/rebuild dirty-set
+    lifecycle, multi-rebuild idempotent routing, render_body skips
+    non-section events, custom config forwarded to client, stable
+    `name() == "outline"`.
+  - Closes #ea35e266 (γ-1 surface; γ-2 wire-up tracked separately on
+    the same issue's follow-up commit).
 - `crates/journal-mcp-core/src/projection/json.rs`: `JsonProjection` —
   machine-readable JSON dump of all chapters + events (v0.3.0 β)
   - Output: `workspace/journal.json` (or caller-supplied path) with a
