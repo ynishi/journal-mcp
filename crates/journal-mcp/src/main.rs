@@ -257,6 +257,17 @@ pub struct JournalProjectionRebuildParams {
     /// given path and executes this call against it.
     #[serde(default)]
     pub project_root: Option<String>,
+    /// Optional per-call output path override for a one-shot rebuild.
+    /// When `Some(path)`, the projection is rebuilt to this path instead of
+    /// the default attached path.  Relative paths are resolved against
+    /// `project_root` (or the startup-time default when `project_root` is
+    /// `None`).  Absolute paths are used as-is.  The default attached
+    /// projection is **not** modified — subsequent `close_chapter` writes
+    /// still go to the default attached path.  Only meaningful when
+    /// `name == "file"`; for other projection names the argument is ignored
+    /// and a warning is logged.
+    #[serde(default)]
+    pub output_path: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +343,9 @@ pub struct JournalInfoResult {
     pub startup_time: String,
     /// `JOURNAL_PROJECT_ROOT` env var value at startup (if set).
     pub env_journal_project_root: Option<PathBuf>,
+    /// Absolute path to the FileProjection output (current attached default).
+    /// Default: `<project_root>/journal.md` (root).
+    pub file_projection_path: PathBuf,
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +392,10 @@ pub struct JournalMcpServer {
     started_at: String,
     /// Value of `JOURNAL_PROJECT_ROOT` env var at startup, if set.
     env_journal_project_root: Option<PathBuf>,
+    /// Absolute path to the default-attached FileProjection output,
+    /// captured at startup.  Used by `journal_info` and as the fallback
+    /// when `journal_projection_rebuild` is called without `output_path`.
+    file_projection_path: PathBuf,
 }
 
 impl JournalMcpServer {
@@ -389,7 +407,7 @@ impl JournalMcpServer {
     /// 2. Open (or create) the journal database at
     ///    `{project_root}/workspace/.journal.db`.
     /// 3. Attach a [`FileProjection`](journal_mcp_core::FileProjection) that writes to
-    ///    `{project_root}/workspace/journal.md`.
+    ///    `{project_root}/journal.md` (root).
     ///
     /// For tests that need to suppress FileProjection I/O, use
     /// [`new_with_config`](Self::new_with_config) (available under `#[cfg(test)]`).
@@ -404,7 +422,7 @@ impl JournalMcpServer {
     /// Internal constructor shared by `new` and the test-only `new_with_config`.
     ///
     /// When `attach_file_projection` is `true`, a [`FileProjection`](journal_mcp_core::FileProjection)
-    /// is attached at `{project_root}/workspace/journal.md`.  When `false`, no projection
+    /// is attached at `{project_root}/journal.md` (root).  When `false`, no projection
     /// is attached.
     ///
     /// # Errors
@@ -422,13 +440,19 @@ impl JournalMcpServer {
             );
         }
 
-        let (core, db_path) = Self::build_core(&project_root, attach_file_projection)?;
+        let (core, db_path, _file_projection_path) =
+            Self::build_core(&project_root, attach_file_projection)?;
         // After build_core succeeds, the project_root (and its workspace
         // subdir) exists, so `canonicalize` resolves all symlinks (e.g. on
         // macOS where TempDir lives under `/var` → `/private/var`).  This
         // canonical form is what `resolve_core` compares against, so storing
         // it here makes the per-call override short-circuit work reliably.
         let canonical_root = std::fs::canonicalize(&project_root).unwrap_or(project_root);
+        // Derive file_projection_path from the already-canonicalized root.
+        // We cannot call canonicalize on journal.md itself because the file does
+        // not exist yet at startup; using canonical_root.join avoids the
+        // /var → /private/var symlink mismatch on macOS.
+        let file_projection_path = canonical_root.join("journal.md");
 
         let schema_registry_path = canonical_root.join(".journal").join("schemas");
 
@@ -450,6 +474,7 @@ impl JournalMcpServer {
             schema_registry_path,
             started_at,
             env_journal_project_root,
+            file_projection_path,
         })
     }
 
@@ -459,7 +484,9 @@ impl JournalMcpServer {
     /// lazy-cache populator (`resolve_core`).  Each call opens an independent
     /// SQLite handle at `{project_root}/workspace/.journal.db` and (optionally)
     /// attaches a `FileProjection` rendering to
-    /// `{project_root}/workspace/journal.md`.
+    /// `{project_root}/journal.md` (root).
+    ///
+    /// Returns `(JournalCore, db_path, file_projection_path)`.
     ///
     /// # Errors
     ///
@@ -467,7 +494,7 @@ impl JournalMcpServer {
     fn build_core(
         project_root: &Path,
         attach_file_projection: bool,
-    ) -> anyhow::Result<(journal_mcp_core::JournalCore, std::path::PathBuf)> {
+    ) -> anyhow::Result<(journal_mcp_core::JournalCore, PathBuf, PathBuf)> {
         let registry = journal_mcp_core::SchemaRegistry::with_project_local(project_root)?;
 
         let db_dir = project_root.join("workspace");
@@ -475,17 +502,20 @@ impl JournalMcpServer {
         std::fs::create_dir_all(&db_dir)?;
         let db_path = db_dir.join(".journal.db");
 
+        // Default FileProjection output path: <project_root>/journal.md (root).
+        // db_dir is kept for .journal.db placement only.
+        let journal_md = project_root.join("journal.md");
+
         // Clone the registry before consuming it; FileProjection needs an Arc.
         let registry_arc = std::sync::Arc::new(registry.clone());
         let mut core = journal_mcp_core::JournalCore::open(&db_path, registry)?;
 
         if attach_file_projection {
-            let journal_md = db_dir.join("journal.md");
-            let proj = journal_mcp_core::FileProjection::new(journal_md, registry_arc);
+            let proj = journal_mcp_core::FileProjection::new(journal_md.clone(), registry_arc);
             core.add_projection(proj);
         }
 
-        Ok((core, db_path))
+        Ok((core, db_path, journal_md))
     }
 
     /// Apply pagination (offset + limit) to a `Vec<T>`.
@@ -545,7 +575,7 @@ impl JournalMcpServer {
         if let Some(c) = extra.get(&canonical) {
             return Ok(c.clone());
         }
-        let (core, _db_path) = Self::build_core(&canonical, true)?;
+        let (core, _db_path, _file_projection_path) = Self::build_core(&canonical, true)?;
         let handle = Arc::new(Mutex::new(core));
         extra.insert(canonical, handle.clone());
         Ok(handle)
@@ -1311,11 +1341,15 @@ impl JournalMcpServer {
     ///
     /// * `name` — the stable name of the projection to rebuild (e.g. `"file"`).
     ///   Must match a projection registered at startup.
+    /// * `output_path` — optional per-call output path for a one-shot rebuild.
+    ///   Only meaningful when `name == "file"`.
     #[tool(
         name = "journal_projection_rebuild",
         description = "Rebuild a named projection by replaying the full EventLog. \
                        Calls rebuild_chapter for every closed chapter. \
-                       Use 'file' to rebuild the workspace/journal.md output.",
+                       Use 'file' to rebuild the journal.md output. \
+                       Optional output_path overrides the default attached path for a one-shot \
+                       rebuild (file projection only; attached projection is unchanged).",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1327,6 +1361,86 @@ impl JournalMcpServer {
         &self,
         Parameters(params): Parameters<JournalProjectionRebuildParams>,
     ) -> Result<String, String> {
+        // Determine the effective project_root for path resolution.
+        let effective_root: PathBuf = if let Some(pr) = &params.project_root {
+            let p = PathBuf::from(pr);
+            std::fs::canonicalize(&p).unwrap_or(p)
+        } else {
+            self.project_root.clone()
+        };
+
+        // per-call output_path override — one-shot rebuild only.
+        if let Some(ref raw_output) = params.output_path {
+            if params.name == "file" {
+                // Resolve the output path.
+                let output_path = {
+                    let p = PathBuf::from(raw_output);
+                    if p.is_absolute() {
+                        p
+                    } else {
+                        effective_root.join(&p)
+                    }
+                };
+
+                // Ensure parent directory exists.
+                if let Some(parent) = output_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("failed to create output_path parent dir: {e}"))?;
+                }
+
+                // Build a temporary FileProjection targeting output_path, then
+                // replay all closed chapters into it (one-shot, attached
+                // projection is untouched).
+                let core_handle = self
+                    .resolve_core(params.project_root.as_deref())
+                    .map_err(|e| format!("resolve_core: {e}"))?;
+                let core = core_handle.lock().unwrap();
+
+                // Fetch registry Arc from the core via a temporary FileProjection wrapper.
+                // We need a SchemaRegistry Arc; reconstruct from the effective root.
+                let registry =
+                    journal_mcp_core::SchemaRegistry::with_project_local(&effective_root)
+                        .map_err(|e| format!("SchemaRegistry::with_project_local: {e}"))?;
+                let registry_arc = std::sync::Arc::new(registry);
+
+                let mut temp_proj =
+                    journal_mcp_core::FileProjection::new(output_path.clone(), registry_arc);
+
+                // Replay all closed chapters into the temp projection.
+                let all_chapters = core.tail_chapters(usize::MAX).map_err(|e| {
+                    tracing::warn!(error = ?e, "journal_projection_rebuild: tail_chapters failed");
+                    e.to_string()
+                })?;
+                for replay in &all_chapters {
+                    if replay.meta.closed_at.is_none() {
+                        continue; // skip open chapters
+                    }
+                    use journal_mcp_core::JournalProjection as _;
+                    temp_proj.rebuild_chapter(replay).map_err(|e| {
+                        tracing::warn!(error = ?e, chapter_id = %replay.meta.chapter_id, "one-shot rebuild_chapter failed");
+                        e.to_string()
+                    })?;
+                }
+
+                tracing::info!(
+                    output_path = ?output_path,
+                    "journal_projection_rebuild: one-shot rebuild complete"
+                );
+                return Ok(format!(
+                    "projection 'file' rebuilt (one-shot) to {}",
+                    output_path.display()
+                ));
+            } else {
+                // output_path is only meaningful for name == "file"; warn and fall through.
+                tracing::warn!(
+                    name = %params.name,
+                    "journal_projection_rebuild: output_path is only applicable for name='file'; \
+                     ignoring and using default rebuild"
+                );
+            }
+        }
+
+        // Default path: rebuild the named attached projection.
         {
             // SAFETY: see journal_open_chapter
             let core_handle = self
@@ -1430,6 +1544,7 @@ impl JournalMcpServer {
             version: env!("CARGO_PKG_VERSION").to_string(),
             startup_time: self.started_at.clone(),
             env_journal_project_root: self.env_journal_project_root.clone(),
+            file_projection_path: self.file_projection_path.clone(),
         };
 
         serde_json::to_string(&result).map_err(|e| {
@@ -1840,7 +1955,7 @@ mod tests {
     /// working server with no FileProjection attached.
     ///
     /// Verifies Crux #3: test-only constructor must succeed and all file paths
-    /// must remain inside the TempDir (no real workspace/journal.md touched).
+    /// must remain inside the TempDir (no real journal.md touched).
     #[test]
     fn test_new_with_config_no_fp_succeeds() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
@@ -1856,17 +1971,25 @@ mod tests {
             workspace.exists(),
             "workspace dir should be created inside TempDir by new_with_config"
         );
-        // The real workspace/journal.md outside TempDir must NOT be created.
-        let real_journal_md = tmp.path().join("workspace").join("journal.md");
+        // Default FileProjection output = <project_root>/journal.md (root).
+        // When attach_file_projection=false, journal.md must NOT be created at root
+        // (no projection is attached, no file should be written).
+        let root_journal_md = tmp.path().join("journal.md");
         assert!(
-            !real_journal_md.exists(),
+            !root_journal_md.exists(),
             "journal.md must not be created when attach_file_projection=false; \
-             path: {real_journal_md:?}"
+             path: {root_journal_md:?}"
+        );
+        // workspace/journal.md (old default, pre-v0.3.0) also must not be created.
+        let workspace_journal_md = tmp.path().join("workspace").join("journal.md");
+        assert!(
+            !workspace_journal_md.exists(),
+            "workspace/journal.md must not be created; path: {workspace_journal_md:?}"
         );
     }
 
     /// T2 (boundary) — `new_with_config(_, true)` attaches FileProjection and
-    /// creates `workspace/journal.md` inside TempDir on first rebuild.
+    /// creates `journal.md` (root) inside TempDir on first rebuild.
     ///
     /// When `attach_file_projection = true` the projection is wired up but the
     /// file is only written on explicit `journal_projection_rebuild`.  Verifies
@@ -2054,7 +2177,7 @@ mod tests {
         assert_eq!(with_none, with_zero);
     }
 
-    /// Verify that `JournalInfoResult` has all 9 expected fields and that all
+    /// Verify that `JournalInfoResult` has all 10 expected fields and that all
     /// path-typed fields are absolute paths.
     #[test]
     fn test_journal_info_return_shape() {
@@ -2064,6 +2187,8 @@ mod tests {
             std::fs::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().to_path_buf());
         let db_path = canonical_root.join("workspace").join(".journal.db");
         let schema_registry_path = canonical_root.join(".journal").join("schemas");
+        // Default FileProjection output path = <project_root>/journal.md (root).
+        let file_projection_path = canonical_root.join("journal.md");
 
         let result = JournalInfoResult {
             project_root: canonical_root.clone(),
@@ -2084,9 +2209,10 @@ mod tests {
             version: env!("CARGO_PKG_VERSION").to_string(),
             startup_time: "2026-01-01T00:00:00Z".to_string(),
             env_journal_project_root: None,
+            file_projection_path: file_projection_path.clone(),
         };
 
-        // All 9 fields must be present (compile-time: struct literal with all fields).
+        // All 10 fields must be present (compile-time: struct literal with all fields).
         // Path-typed fields must be absolute.
         assert!(
             result.project_root.is_absolute(),
@@ -2112,6 +2238,11 @@ mod tests {
             result.schema_registry_path.is_absolute(),
             "schema_registry_path must be absolute, got: {:?}",
             result.schema_registry_path
+        );
+        assert!(
+            result.file_projection_path.is_absolute(),
+            "file_projection_path must be absolute, got: {:?}",
+            result.file_projection_path
         );
         // version must be non-empty
         assert!(!result.version.is_empty(), "version must be non-empty");
@@ -2145,6 +2276,299 @@ mod tests {
             3,
             "expected 3 stale .bak files, got: {:?}",
             found
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // FileProjection output-path config tests
+    // -----------------------------------------------------------------------
+
+    /// T1 (default = root) — after open + close, `<project_root>/journal.md`
+    /// is generated and `workspace/journal.md` is NOT generated.
+    ///
+    /// BREAKING change from v0.2.x where the default was `workspace/journal.md`.
+    #[tokio::test]
+    async fn test_fp_default_path_is_root() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new");
+        // Build server with FileProjection attached (attach=true).
+        let server = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), true)
+            .expect("new_with_config(true)");
+
+        // Open a chapter, close it — this triggers FileProjection write.
+        use rmcp::handler::server::wrapper::Parameters;
+        let chapter_id = {
+            let params = JournalOpenChapterParams {
+                name: "t1-test-chapter".to_string(),
+                schema_id: "ytk-canonical-v1".to_string(),
+                project_root: None,
+            };
+            // journal_open_chapter returns Ok(id.0) — a plain UUID string, not JSON.
+            server
+                .journal_open_chapter(Parameters(params))
+                .await
+                .expect("open_chapter should succeed")
+                .trim()
+                .to_string()
+        };
+
+        // Append required sections.
+        for section in &["Verified", "Done", "Decided", "Not Done", "Issues touched"] {
+            let params = JournalAppendSectionParams {
+                chapter_id: chapter_id.clone(),
+                section_name: section.to_string(),
+                body: format!("- {section} content"),
+                project_root: None,
+            };
+            server
+                .journal_append_section(Parameters(params))
+                .await
+                .expect("append_section should succeed");
+        }
+
+        // Close the chapter.
+        let close_params = JournalCloseChapterParams {
+            chapter_id: chapter_id.clone(),
+            project_root: None,
+        };
+        server
+            .journal_close_chapter(Parameters(close_params))
+            .await
+            .expect("close_chapter should succeed");
+
+        // ST7: close_chapter does NOT auto-dispatch FileProjection.
+        // We must call journal_projection_rebuild explicitly.
+        let rebuild_params = JournalProjectionRebuildParams {
+            name: "file".to_string(),
+            project_root: None,
+            output_path: None,
+        };
+        server
+            .journal_projection_rebuild(Parameters(rebuild_params))
+            .await
+            .expect("journal_projection_rebuild should succeed");
+
+        // Assert: <project_root>/journal.md (root) must exist after explicit rebuild.
+        let root_journal = tmp.path().join("journal.md");
+        assert!(
+            root_journal.exists(),
+            "journal.md must be created at <project_root>/journal.md (root); \
+             checked: {root_journal:?}"
+        );
+
+        // Assert: workspace/journal.md (old default) must NOT exist.
+        let ws_journal = tmp.path().join("workspace").join("journal.md");
+        assert!(
+            !ws_journal.exists(),
+            "workspace/journal.md must NOT be created (v0.3.0 default is root); \
+             checked: {ws_journal:?}"
+        );
+    }
+
+    /// T2 (per-call output_path relative) — `journal_projection_rebuild` with
+    /// `output_path=Some("workspace/journal.md")` writes to workspace/journal.md,
+    /// while the attached default (root journal.md) is NOT re-touched.
+    #[tokio::test]
+    async fn test_fp_per_call_relative_output_path() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new");
+        let server = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), true)
+            .expect("new_with_config(true)");
+
+        use rmcp::handler::server::wrapper::Parameters;
+
+        // Create and close one chapter so the EventLog has something to replay.
+        let chapter_id = {
+            let params = JournalOpenChapterParams {
+                name: "t2-chapter".to_string(),
+                schema_id: "ytk-canonical-v1".to_string(),
+                project_root: None,
+            };
+            // journal_open_chapter returns Ok(id.0) — a plain UUID string, not JSON.
+            server
+                .journal_open_chapter(Parameters(params))
+                .await
+                .expect("open_chapter")
+                .trim()
+                .to_string()
+        };
+        for section in &["Verified", "Done", "Decided", "Not Done", "Issues touched"] {
+            let params = JournalAppendSectionParams {
+                chapter_id: chapter_id.clone(),
+                section_name: section.to_string(),
+                body: format!("- {section}"),
+                project_root: None,
+            };
+            server
+                .journal_append_section(Parameters(params))
+                .await
+                .unwrap();
+        }
+        server
+            .journal_close_chapter(Parameters(JournalCloseChapterParams {
+                chapter_id,
+                project_root: None,
+            }))
+            .await
+            .unwrap();
+
+        // ST7: close_chapter does NOT auto-dispatch FileProjection.
+        // Explicitly rebuild to the default (root) path to create journal.md.
+        server
+            .journal_projection_rebuild(Parameters(JournalProjectionRebuildParams {
+                name: "file".to_string(),
+                project_root: None,
+                output_path: None,
+            }))
+            .await
+            .expect("initial rebuild to root journal.md");
+
+        // Record the last-modified time of root journal.md (written by explicit rebuild).
+        let root_journal = tmp.path().join("journal.md");
+        assert!(
+            root_journal.exists(),
+            "root journal.md must exist after explicit rebuild"
+        );
+        let mtime_before = std::fs::metadata(&root_journal)
+            .expect("metadata")
+            .modified()
+            .ok();
+
+        // Give filesystem a tick so mtime would differ if the file were re-written.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // One-shot rebuild to workspace/journal.md via relative output_path.
+        let rebuild_params = JournalProjectionRebuildParams {
+            name: "file".to_string(),
+            project_root: None,
+            output_path: Some("workspace/journal.md".to_string()),
+        };
+        let res = server
+            .journal_projection_rebuild(Parameters(rebuild_params))
+            .await
+            .expect("rebuild with relative output_path");
+        assert!(
+            res.contains("one-shot"),
+            "rebuild response should mention one-shot; got: {res}"
+        );
+
+        // workspace/journal.md must now exist (created by one-shot).
+        let ws_journal = tmp.path().join("workspace").join("journal.md");
+        assert!(
+            ws_journal.exists(),
+            "workspace/journal.md must be created by per-call rebuild; checked: {ws_journal:?}"
+        );
+
+        // root journal.md must NOT have been re-touched (attached projection unchanged).
+        let mtime_after = std::fs::metadata(&root_journal)
+            .expect("metadata after")
+            .modified()
+            .ok();
+        assert_eq!(
+            mtime_before, mtime_after,
+            "root journal.md must not be re-written by one-shot rebuild \
+             (attached projection must be unchanged)"
+        );
+    }
+
+    /// T3 (per-call output_path absolute) — `journal_projection_rebuild` with
+    /// an absolute path writes to that path.
+    #[tokio::test]
+    async fn test_fp_per_call_absolute_output_path() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new for server");
+        let tmp_out = tempfile::TempDir::new().expect("TempDir::new for output");
+        let server = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), true)
+            .expect("new_with_config(true)");
+
+        use rmcp::handler::server::wrapper::Parameters;
+
+        // Create and close one chapter.
+        let chapter_id = {
+            let params = JournalOpenChapterParams {
+                name: "t3-chapter".to_string(),
+                schema_id: "ytk-canonical-v1".to_string(),
+                project_root: None,
+            };
+            // journal_open_chapter returns Ok(id.0) — a plain UUID string, not JSON.
+            server
+                .journal_open_chapter(Parameters(params))
+                .await
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        for section in &["Verified", "Done", "Decided", "Not Done", "Issues touched"] {
+            server
+                .journal_append_section(Parameters(JournalAppendSectionParams {
+                    chapter_id: chapter_id.clone(),
+                    section_name: section.to_string(),
+                    body: format!("- {section}"),
+                    project_root: None,
+                }))
+                .await
+                .unwrap();
+        }
+        server
+            .journal_close_chapter(Parameters(JournalCloseChapterParams {
+                chapter_id,
+                project_root: None,
+            }))
+            .await
+            .unwrap();
+
+        // Absolute path target in a different TempDir.
+        let abs_output = tmp_out.path().join("elsewhere").join("dump.md");
+        let abs_output_str = abs_output
+            .to_str()
+            .expect("absolute output path must be valid UTF-8")
+            .to_string();
+
+        let res = server
+            .journal_projection_rebuild(Parameters(JournalProjectionRebuildParams {
+                name: "file".to_string(),
+                project_root: None,
+                output_path: Some(abs_output_str),
+            }))
+            .await
+            .expect("rebuild with absolute output_path");
+        assert!(
+            res.contains("one-shot"),
+            "response must mention one-shot; got: {res}"
+        );
+
+        assert!(
+            abs_output.exists(),
+            "dump.md must be created at absolute path; checked: {abs_output:?}"
+        );
+    }
+
+    /// T4 (journal_info file_projection_path) — `journal_info()` returns
+    /// `file_projection_path` = `<project_root>/journal.md` (absolute).
+    #[tokio::test]
+    async fn test_fp_journal_info_file_projection_path() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new");
+        // Canonicalize to handle macOS /var -> /private/var symlink.
+        let canonical_root =
+            std::fs::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().to_path_buf());
+
+        let server = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), true)
+            .expect("new_with_config(true)");
+
+        let info_json = server
+            .journal_info()
+            .await
+            .expect("journal_info should succeed");
+        let info: serde_json::Value = serde_json::from_str(&info_json).expect("journal_info JSON");
+
+        let fp_path = info["file_projection_path"]
+            .as_str()
+            .expect("file_projection_path must be a string");
+
+        // Must be an absolute path ending with journal.md at root.
+        let expected = canonical_root.join("journal.md");
+        assert_eq!(
+            std::path::Path::new(fp_path),
+            expected.as_path(),
+            "file_projection_path must be <project_root>/journal.md (root); \
+             expected: {expected:?}, got: {fp_path}"
         );
     }
 }

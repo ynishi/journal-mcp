@@ -425,6 +425,44 @@ The following limitations are known and tracked separately:
 
 ---
 
+## Migration: existing workspace-placement projects (v0.2.x → v0.3.0)
+
+v0.3.0 で FileProjection default output path が
+`<project_root>/workspace/journal.md` から
+`<project_root>/journal.md` (root) に変更されました。
+
+### 影響範囲
+
+既存 project で `workspace/journal.md` を canonical surface としていた場合、
+v0.3.0 以降は default で `<project_root>/journal.md` に書き出されます。
+`workspace/.journal.db` (EventLog SQLite) は変更されません。
+
+### Migration option A: per-call `output_path` で workspace 配置を維持 (推奨)
+
+`journal_projection_rebuild` 呼び出し時に `output_path="workspace/journal.md"` を指定:
+
+```
+mcp__journal__journal_projection_rebuild(
+  name="file",
+  output_path="workspace/journal.md"
+)
+```
+
+`output_path` は **one-shot** のため、通常運用の `close_chapter` 自動 write は
+default (root) に行きます。ongoing 書き込みを workspace に継続したい場合は
+Option B を参照してください。
+
+### Migration option B: 物理 mv で root 配置に移行
+
+```bash
+cd <project_root>
+mv workspace/journal.md journal.md
+```
+
+v0.3.0 default と整合し、以降の `close_chapter` 自動 write も同じ path に着地します。
+
+---
+
 ## See also
 
 - [`docs/design.md`](design.md) — full design specification (EventLog, schema,

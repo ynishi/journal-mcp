@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed (BREAKING)
+
+- FileProjection default output path changed from `<project_root>/workspace/journal.md`
+  to `<project_root>/journal.md` (root).  Existing workspace-placement projects:
+  see `docs/migration-guide.md` §"Migration: existing workspace-placement projects
+  (v0.2.x → v0.3.0)" for the one-line caller-side patch (per-call `output_path`
+  argument on `journal_projection_rebuild`).
+
+### Added
+
+- `journal_projection_rebuild` accepts new optional `output_path` argument for
+  one-shot rebuild to an alternative path (file projection only; attached
+  projection unchanged).  Relative paths are resolved against `project_root`;
+  absolute paths are used as-is.
+- `journal_info` returns new field `file_projection_path` exposing the default
+  attached FileProjection output path (absolute, captured at startup).
+
 ## [0.2.1] — 2026-06-15
 
 ### Fixed
@@ -103,7 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `cosine_similarity` (in `vector` module) raised to
     `pub(super)` so the SQLite backend can reuse the same scorer as
     ε-1 — guarantees identical ranking semantics across backends.
-  - No new dependencies (uses existing rusqlite). Closes #(internal tracker)
+  - No new dependencies (uses existing rusqlite). Closes (internal tracker)
     partial (ε-2 surface; ε-3/ε-4 carry on the same issue).
 - `crates/journal-mcp-core/src/projection/vector.rs`: `VectorProjection`
   + `VectorClient` trait — embedding-based semantic search index
@@ -143,7 +162,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     search dimension-mismatch error, stable `name() == "vector"`,
     cosine_similarity hand-verified values.
   - No new dependencies (in-memory store + pure-Rust cosine).
-  - Closes #(internal tracker) partial (ε-1 surface; ε-2/ε-3/ε-4 carry on the
+  - Closes (internal tracker) partial (ε-1 surface; ε-2/ε-3/ε-4 carry on the
     same issue's follow-up commits).
 - `crates/journal-mcp-core/src/projection/miniapp_client.rs`:
   `MiniAppCoreClient` — concrete [`MiniAppClient`] impl using
@@ -176,7 +195,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     create/query/update through real SQLite; query returns None when
     absent; schema_ensure is a no-op; open returns Err on malformed
     YAML.
-  - Closes #2b562589 (δ-2 wire-up; δ-1 trait + generic + mock landed in
+  - Closes (internal tracker) (δ-2 wire-up; δ-1 trait + generic + mock landed in
     b855a5e).
 
 ### Changed
@@ -226,7 +245,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     UUID extraction, mark_dirty/rebuild dirty-set lifecycle,
     multi-rebuild idempotent routing, custom config forwarded,
     scan_uuids no false positives on commit hashes / wrong-width hex.
-  - Closes #2b562589 (δ-1 surface; δ-2 wire-up tracked separately on
+  - Closes (internal tracker) (δ-1 surface; δ-2 wire-up tracked separately on
     the same issue's follow-up commit).
 - `crates/journal-mcp-core/src/projection/outline.rs`: `OutlineProjection`
   + `OutlineClient` trait — sync chapters as nodes in an Outline-MCP book
@@ -256,7 +275,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     lifecycle, multi-rebuild idempotent routing, render_body skips
     non-section events, custom config forwarded to client, stable
     `name() == "outline"`.
-  - Closes #ea35e266 (γ-1 surface; γ-2 wire-up tracked separately on
+  - Closes (internal tracker) (γ-1 surface; γ-2 wire-up tracked separately on
     the same issue's follow-up commit).
 - `crates/journal-mcp-core/src/projection/json.rs`: `JsonProjection` —
   machine-readable JSON dump of all chapters + events (v0.3.0 β)
@@ -277,7 +296,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 7 new unit tests (new-does-not-touch-fs, valid-envelope-round-trip,
     idempotency, multi-chapter-lex-ordering, replace-existing-chapter,
     auto-create-parent-dir, mark_dirty-no-op)
-  - No new dependencies (`serde_json` already in tree). Closes #75991975.
+  - No new dependencies (`serde_json` already in tree). Closes (internal tracker).
 - `crates/journal-mcp-core/src/projection/fts5.rs`: `FTS5Projection` — SQLite
   FTS5 full-text search index over chapter section bodies (v0.3.0 α)
   - SQLite virtual table `journal_fts` co-located in `.journal.db`, indexed
@@ -300,7 +319,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Handler-side wire-up (routing `journal_grep` through the FTS5 fast
     path when attached) lands in a follow-up commit alongside the
     default-attached set decision (master issue bc3b7c79 / design doc §3).
-    Closes #7429275b (projection implementation surface; handler wire-up
+    Closes (internal tracker) (projection implementation surface; handler wire-up
     tracked separately).
 - `crates/journal-mcp/src/main.rs`: per-call `project_root` override on all 16
   MCP tools (multi-project workflow support)
@@ -323,7 +342,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 4 new unit tests covering `resolve_core` semantics: default-passthrough,
     override-creates-separate-db, override-caches-handle, canonical-matches-default
   - Backward-compatible: existing MCP clients that omit `project_root` from
-    tool calls see no behaviour change. Closes #b4a5b61b.
+    tool calls see no behaviour change. Closes (internal tracker).
 - `journal_chapter_list`: pagination via optional `limit` / `offset`
   parameters on `JournalChapterListParams`
   - `limit: Option<usize>` — maximum number of chapters to return,
@@ -341,7 +360,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     limit-only, offset-only, limit-and-offset, offset-overflow-yields-empty,
     offset-zero-same-as-none.
   - Backward-compatible: existing MCP clients that omit both fields see no
-    behaviour change. Closes #98123835.
+    behaviour change. Closes (internal tracker).
 - `JournalMcpServer.project_root` is now canonicalized at construction time
   (was: raw `PathBuf` as supplied). This makes the `resolve_core`
   short-circuit reliable on platforms where the supplied path differs from
