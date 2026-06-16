@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.3.0] — 2026-06-16
+
 ### Changed (BREAKING)
 
 - FileProjection default output path changed from `<project_root>/workspace/journal.md`
@@ -23,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absolute paths are used as-is.
 - `journal_info` returns new field `file_projection_path` exposing the default
   attached FileProjection output path (absolute, captured at startup).
+- Internal-doc-leak sweep: all 9 `Closes #<8-hex>` mini-app issue id literals
+  in v0.2.0 entries replaced with abstract `(internal tracker)` form (private
+  convention token leak fix).
 
 ## [0.2.1] — 2026-06-15
 

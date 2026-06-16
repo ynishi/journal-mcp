@@ -13,7 +13,7 @@ name = "journal-mcp"
 path = "src/main.rs"
 
 [dependencies]
-journal-mcp-core = { version = "0.2.1", path = "../journal-mcp-core" }
+journal-mcp-core = { version = "0.3.0", path = "../journal-mcp-core" }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
