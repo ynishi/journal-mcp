@@ -463,6 +463,132 @@ v0.3.0 default と整合し、以降の `close_chapter` 自動 write も同じ p
 
 ---
 
+## Migration: v0.3.x → v0.4.0 (env-gated FileProjection)
+
+v0.4.0 で以下が同時に変更されました (BREAKING):
+
+1. **FileProjection 自動 attach 廃止** — default では `journal.md` がどこにも
+   出力されません。`JOURNAL_FILE_ENABLE` env を set した時のみ attach されます
+2. **PATH default 復帰** — env-enabled 時の default path は v0.3.0 root から
+   `<project_root>/workspace/journal.md` (= v0.2.x 互換) に戻りました
+3. **`JournalInfoResult.file_projection_path` が `Option<PathBuf>` 化** —
+   attach 無し時は `null` を返します
+
+動機: repo root に repo log を出す前提が「意図しない git add 事故 / publish
+事故」 を量産しやすく、 repo log を repo に commit する文化はまだ一般的
+ではないため、 default を「何も出さない (EventLog SoT のみ)」 に戻し、
+出したい人だけ env で明示 opt-in する形に再構成しました。
+
+### 1. v0.2.x からの直接 migration
+
+v0.2.x で `workspace/journal.md` 運用していた場合、`.mcp.json` の env
+ブロックに `JOURNAL_FILE_ENABLE=1` を追加するだけで v0.4.0 でも同じ
+`workspace/journal.md` に出力されます (path default が v0.2.x と一致):
+
+```json
+{
+  "mcpServers": {
+    "journal": {
+      "command": "journal-mcp",
+      "env": {
+        "JOURNAL_PROJECT_ROOT": "/path/to/project",
+        "JOURNAL_FILE_ENABLE": "1"
+      }
+    }
+  }
+}
+```
+
+### 2. v0.3.x からの migration (root → workspace に戻す、 推奨)
+
+v0.3.x で root の `journal.md` 運用していた場合、 v0.4.0 default
+(workspace 配置) に切り替えるのが**推奨**です。 git add 事故 / publish
+事故 risk を下げます:
+
+```bash
+# 1. 既存 root の journal.md は backup or 削除 (FileProjection は EventLog
+#    から再生成可能なので削除して問題なし、 backup したい場合は mv)
+cd <project_root>
+rm journal.md   # または mv journal.md /tmp/journal.md.v0.3.0-backup
+
+# 2. .mcp.json env に JOURNAL_FILE_ENABLE=1 を追加 (PATH 指定は不要、
+#    default = workspace/journal.md が自動採用される)
+
+# 3. server 再起動後、 次の close_chapter で workspace/journal.md が
+#    生成される (または journal_projection_rebuild を明示呼び出し)
+mcp__journal__journal_projection_rebuild(name="file")
+```
+
+### 3. v0.3.x からの migration (root 配置を継続する場合)
+
+何らかの理由で root 配置を維持したい場合、 `JOURNAL_FILE_OUTPUT_PATH`
+で明示します:
+
+```json
+{
+  "mcpServers": {
+    "journal": {
+      "command": "journal-mcp",
+      "env": {
+        "JOURNAL_PROJECT_ROOT": "/path/to/project",
+        "JOURNAL_FILE_ENABLE": "1",
+        "JOURNAL_FILE_OUTPUT_PATH": "journal.md"
+      }
+    }
+  }
+}
+```
+
+注意: relative path は `JOURNAL_PROJECT_ROOT` 起点で resolve されます。
+absolute path も指定可能 (e.g. `/var/log/myproject/journal.md`)。
+
+### 4. File 出力をやめる選択肢 (新規 default)
+
+v0.4.0 から、 file 出力なしで EventLog (`workspace/.journal.db`) のみで
+運用するのが default です。 chapter 内容は MCP tool 経由で参照します:
+
+- `mcp__journal__journal_tail(n=N)` — 末尾 N 章
+- `mcp__journal__journal_grep(pattern, since?, until?)` — substring 検索
+- `mcp__journal__journal_chapter_list(limit?, offset?)` — 全章一覧
+- `mcp__journal__journal_progress_of(chapter_id)` — Progress 節
+
+file 出力を完全に廃止する場合は `.mcp.json` から
+`JOURNAL_FILE_ENABLE` / `JOURNAL_FILE_OUTPUT_PATH` を**削除**します
+(unset = no attach = no file output)。 既存の `journal.md` file が残って
+いる場合は手動で削除してください (server は touch しません)。
+
+### 5. Env 詰めポイント (FAQ)
+
+| 状況 | 挙動 |
+|---|---|
+| `JOURNAL_FILE_ENABLE` unset, `JOURNAL_FILE_OUTPUT_PATH` unset | 何も attach されない (新 default、 EventLog SoT のみ) |
+| `JOURNAL_FILE_ENABLE=1`, `JOURNAL_FILE_OUTPUT_PATH` unset | `<project_root>/workspace/journal.md` に attach |
+| `JOURNAL_FILE_ENABLE=1`, `JOURNAL_FILE_OUTPUT_PATH=foo/bar.md` | `<project_root>/foo/bar.md` に attach (relative) |
+| `JOURNAL_FILE_ENABLE=1`, `JOURNAL_FILE_OUTPUT_PATH=/abs/path.md` | `/abs/path.md` に attach (absolute) |
+| `JOURNAL_FILE_ENABLE` unset, `JOURNAL_FILE_OUTPUT_PATH=...` | **何も attach されない** (strict gate)、 startup に `tracing::warn!` 出力 |
+| `JOURNAL_FILE_ENABLE=` (空文字列) | **attach される** (set/unset 判定は `var_os().is_some()`、 値は無視) |
+| `JOURNAL_FILE_ENABLE=0` | **attach される** (値無視仕様。 disable したいなら env を unset) |
+
+### 6. `journal_info()` の breaking change 対応
+
+MCP 経由で `journal_info()` を呼んで `file_projection_path` を読んで
+いる client は `Option<PathBuf>` (= JSON で `null` も来る) に対応する
+必要があります:
+
+```python
+# 旧コード (v0.3.x 想定): path は常に string
+fp_path = info["file_projection_path"]
+
+# 新コード (v0.4.0+ 対応)
+fp_path = info.get("file_projection_path")  # None なら no attach
+if fp_path is None:
+    print("FileProjection is not attached (EventLog only)")
+else:
+    print(f"FileProjection writes to: {fp_path}")
+```
+
+---
+
 ## See also
 
 - [`docs/design.md`](design.md) — full design specification (EventLog, schema,

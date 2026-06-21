@@ -19,6 +19,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.4.0] — 2026-06-22
+
+### Changed (BREAKING)
+
+- `FileProjection` is no longer auto-attached at server startup. The default
+  behaviour in v0.4.0 is to attach NO projection — the EventLog
+  (`workspace/.journal.db`) is the only canonical store, and chapter content
+  is read back via MCP tools (`journal_tail` / `journal_grep` /
+  `journal_chapter_list` / `journal_progress_of`). To re-enable file output,
+  set `JOURNAL_FILE_ENABLE` (any value) before starting the server.
+- The v0.3.0 default `FileProjection` output path of
+  `<project_root>/journal.md` (root) is discontinued. When env-enabled, the
+  new default is `<project_root>/workspace/journal.md` (= v0.2.x-compatible
+  layout) — repo-log-at-root carried real "accidental git add" risk and
+  publish leak risk, so v0.4.0 returns to the workspace placement.
+- `JournalInfoResult.file_projection_path` field type changed from
+  `PathBuf` to `Option<PathBuf>`. The field is `null` (serialised) / `None`
+  (struct) when no `FileProjection` is attached (the new default). MCP
+  clients that read `journal_info()` JSON must handle the `null` case.
+- Test-only constructor `JournalMcpServer::new_with_config(root, bool)`
+  removed. Replaced by `new_with_file_attach(root, output_path: PathBuf)` /
+  `new_without_file_attach(root)`. Both bypass env vars for deterministic
+  test behaviour and do not race against ambient `JOURNAL_FILE_*` state.
+
+### Added
+
+- `JOURNAL_FILE_ENABLE` env var. When set (any value), a `FileProjection`
+  is attached at server startup. When unset (default), no projection is
+  attached. Disabling at runtime is done by unsetting the env var and
+  restarting the server.
+- `JOURNAL_FILE_OUTPUT_PATH` env var. When set, overrides the default
+  `FileProjection` output path. Relative paths resolve against the
+  resolved `project_root` (`JOURNAL_PROJECT_ROOT` or `cwd`); absolute
+  paths are used as-is. Has no effect when `JOURNAL_FILE_ENABLE` is unset
+  — a `tracing::warn!` is emitted at startup in that case to surface the
+  misconfiguration (strict gate: PATH alone does not attach).
+- `crates/journal-mcp/src/main.rs`: `FileProjectionMode` enum (`FromEnv` /
+  `ForceAttachAt(PathBuf)` / `ForceDisabled`) and `resolve_file_projection_path`
+  pure function (exposed at `pub(crate)` for unit-testing the env-resolution
+  semantics without touching the real process environment).
+
+### Removed
+
+- Default startup auto-attach of `FileProjection`.
+- v0.3.0 root-placement default for `FileProjection` output path
+  (`<project_root>/journal.md`).
+- `JournalMcpServer::new_with_config(root, bool)` test constructor.
+
+### Migration
+
+- **v0.2.x consumers** (used `workspace/journal.md`): set
+  `JOURNAL_FILE_ENABLE=1` in the `.mcp.json` env block (no `JOURNAL_FILE_OUTPUT_PATH`
+  required — the v0.4.0 default matches v0.2.x).
+- **v0.3.x consumers** (used `<project_root>/journal.md`): two choices —
+  (a) set `JOURNAL_FILE_ENABLE=1` and `JOURNAL_FILE_OUTPUT_PATH=journal.md`
+  to retain the v0.3.0 root layout, or (b) set only `JOURNAL_FILE_ENABLE=1`
+  to adopt the new `workspace/journal.md` default (recommended — reduces
+  accidental `git add` of internal logs).
+- **MCP clients reading `journal_info().file_projection_path`**: handle
+  the JSON `null` case (no projection attached). Prior code that assumed
+  a non-null path string must add the null-check.
+- See `docs/migration-guide.md` §"v0.3.x → v0.4.0" for the full table.
+
+### Out of scope (carry)
+
+- ENABLE env vars for other sinks (outline / miniapp / fts5 / json /
+  vector) — tracked separately in mini-app issue `c597fcc4`.
+- Per-sink dedicated MCP tools (`journal_file_attach`, etc.) — judged
+  unneeded; the generic `journal_projection_attach(name)` IF is retained
+  but is now a no-op acknowledgement at runtime (set the env var at
+  startup to actually attach).
+- EventLog placement (`workspace/.journal.db`) remains literal-fixed; an
+  `JOURNAL_DB_PATH`-style override is a separate axis of discussion.
+
 ## [0.3.0] — 2026-06-16
 
 ### Changed (BREAKING)

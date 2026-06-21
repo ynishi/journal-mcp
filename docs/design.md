@@ -524,6 +524,8 @@ render template は active schema の `render.file_projection` から取得し�
 | 並行性モデル | single-writer 前提 + SQLite WAL (concurrent reader 1 writer)、 MCP session 内逐次処理、 並列 append は scope 外 (§13) |
 | SchemaRegistry resolve | L1 built-in (crate 同梱) → L2 project-local (`.journal/schemas/`) の hierarchical resolve、 L2 が同 schema_id を override、 chapter は `chapter_meta.schema_id` で版固定 (BP-1.2) |
 | ChapterHandle 内部表現 | JournalCore 内部の `ChapterHandle<S: ChapterState>` で typestate 適用 (`Open` / `Appending` / `Closed`)、 公開 API は影響なし (BP-6.2) |
+| FileProjection auto-attach | v0.4.0 で廃止。 `JOURNAL_FILE_ENABLE` env set 時のみ attach、 unset 時は何も attach されない (EventLog SoT のみ運用が default)。 repo log を root に出す default の意図しない git add / publish 事故対策。 |
+| `JOURNAL_FILE_OUTPUT_PATH` env | ENABLE set 時のみ有効 (strict gate: PATH 単独 set は startup warn + ignore)。 未指定 default = `<project_root>/workspace/journal.md` (v0.2.x 互換)、 relative path は `project_root` 起点、 absolute path は as-is。 詳細は `docs/migration-guide.md` §"v0.3.x → v0.4.0" 参照 |
 
 ## 10. 段階 (実装 step)
 

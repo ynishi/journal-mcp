@@ -9,6 +9,18 @@
 //!
 //! * `JOURNAL_PROJECT_ROOT` — root directory of the project.  Defaults to the
 //!   process's current working directory.
+//! * `JOURNAL_FILE_ENABLE` — when set (any value), attach a `FileProjection`
+//!   at server startup.  When unset (default in v0.4.0), no projection is
+//!   attached and the EventLog (`workspace/.journal.db`) is the only canonical
+//!   store; chapter content is read back through MCP tools (`journal_tail` /
+//!   `journal_grep` / `journal_chapter_list` / `journal_progress_of`).
+//! * `JOURNAL_FILE_OUTPUT_PATH` — output path for the `FileProjection` when
+//!   `JOURNAL_FILE_ENABLE` is set.  Relative paths resolve against
+//!   `JOURNAL_PROJECT_ROOT`; absolute paths are used as-is.  When unset, the
+//!   default is `<project_root>/workspace/journal.md` (v0.2.x-compatible
+//!   layout).  Has no effect when `JOURNAL_FILE_ENABLE` is unset; a
+//!   `tracing::warn!` is emitted at startup in that case to surface the
+//!   misconfiguration.
 //!
 //! See `docs/design.md §6` for the full tool table and `§10 Step 5` for the
 //! stdio transport specification.
@@ -343,9 +355,89 @@ pub struct JournalInfoResult {
     pub startup_time: String,
     /// `JOURNAL_PROJECT_ROOT` env var value at startup (if set).
     pub env_journal_project_root: Option<PathBuf>,
-    /// Absolute path to the FileProjection output (current attached default).
-    /// Default: `<project_root>/journal.md` (root).
-    pub file_projection_path: PathBuf,
+    /// Absolute path to the FileProjection output (current attached default),
+    /// or `None` when no `FileProjection` is attached.
+    ///
+    /// In v0.4.0 the auto-attach default was removed; the projection is only
+    /// attached when `JOURNAL_FILE_ENABLE` is set at startup.  When attached,
+    /// the path is either `<project_root>/workspace/journal.md` (default) or
+    /// the value of `JOURNAL_FILE_OUTPUT_PATH` (resolved as documented in the
+    /// crate-level env var notes).
+    pub file_projection_path: Option<PathBuf>,
+}
+
+// ---------------------------------------------------------------------------
+// FileProjection startup mode
+// ---------------------------------------------------------------------------
+
+/// Determines whether (and where) the startup-time `FileProjection` is attached.
+///
+/// Production code always uses [`FileProjectionMode::FromEnv`]; test code uses
+/// [`FileProjectionMode::ForceAttachAt`] / [`FileProjectionMode::ForceDisabled`]
+/// to bypass env vars for deterministic test behaviour.
+#[derive(Debug, Clone)]
+pub(crate) enum FileProjectionMode {
+    /// Production path.  Reads `JOURNAL_FILE_ENABLE` and
+    /// `JOURNAL_FILE_OUTPUT_PATH` env vars to decide whether to attach.
+    FromEnv,
+    /// Test path.  Force-attach a `FileProjection` at the given path,
+    /// ignoring env vars.  Relative paths resolve against `project_root`.
+    #[cfg(test)]
+    ForceAttachAt(PathBuf),
+    /// Test path.  Force-disable the startup `FileProjection`, ignoring
+    /// env vars.
+    #[cfg(test)]
+    ForceDisabled,
+}
+
+/// Pure function: resolve the startup `FileProjection` output path from
+/// env-style inputs.
+///
+/// Inputs are passed explicitly so this function is unit-testable without
+/// touching the real process environment.  Caller is responsible for actually
+/// reading the env vars before delegating to this function (or for supplying
+/// stub values from a test).
+///
+/// Returns `(Some(path), None)` when ENABLE is set — the path comes from
+/// `path_env` when supplied (relative resolved against `project_root`,
+/// absolute used as-is), otherwise defaults to
+/// `<project_root>/workspace/journal.md`.
+///
+/// Returns `(None, Some(warn_msg))` when `path_env.is_some()` but ENABLE is
+/// unset (strict gate: PATH alone does not attach; caller should emit the
+/// `warn_msg` via `tracing::warn!`).
+///
+/// Returns `(None, None)` when neither ENABLE nor PATH are set (the default
+/// in v0.4.0 — no projection attached, EventLog SoT only).
+pub(crate) fn resolve_file_projection_path(
+    project_root: &Path,
+    enable_set: bool,
+    path_env: Option<&std::ffi::OsStr>,
+) -> (Option<PathBuf>, Option<&'static str>) {
+    if !enable_set {
+        if path_env.is_some() {
+            return (
+                None,
+                Some(
+                    "JOURNAL_FILE_OUTPUT_PATH is set but JOURNAL_FILE_ENABLE is unset; \
+                     FileProjection NOT attached. Set JOURNAL_FILE_ENABLE to enable file output.",
+                ),
+            );
+        }
+        return (None, None);
+    }
+    let resolved = match path_env {
+        Some(s) => {
+            let pb = PathBuf::from(s);
+            if pb.is_absolute() {
+                pb
+            } else {
+                project_root.join(pb)
+            }
+        }
+        None => project_root.join("workspace").join("journal.md"),
+    };
+    (Some(resolved), None)
 }
 
 // ---------------------------------------------------------------------------
@@ -392,10 +484,14 @@ pub struct JournalMcpServer {
     started_at: String,
     /// Value of `JOURNAL_PROJECT_ROOT` env var at startup, if set.
     env_journal_project_root: Option<PathBuf>,
-    /// Absolute path to the default-attached FileProjection output,
-    /// captured at startup.  Used by `journal_info` and as the fallback
-    /// when `journal_projection_rebuild` is called without `output_path`.
-    file_projection_path: PathBuf,
+    /// Absolute path to the startup-attached FileProjection output, or
+    /// `None` when no `FileProjection` was attached at startup (the v0.4.0
+    /// default unless `JOURNAL_FILE_ENABLE` is set).
+    ///
+    /// Used by `journal_info` to expose the resolved path to MCP callers.
+    /// `journal_projection_rebuild` ignores this field; per-call output paths
+    /// always resolve against `project_root` (or are absolute).
+    file_projection_path: Option<PathBuf>,
 }
 
 impl JournalMcpServer {
@@ -406,29 +502,33 @@ impl JournalMcpServer {
     /// 1. Load the schema registry (`SchemaRegistry::with_project_local`).
     /// 2. Open (or create) the journal database at
     ///    `{project_root}/workspace/.journal.db`.
-    /// 3. Attach a [`FileProjection`](journal_mcp_core::FileProjection) that writes to
-    ///    `{project_root}/journal.md` (root).
+    /// 3. (v0.4.0) Optionally attach a [`FileProjection`](journal_mcp_core::FileProjection)
+    ///    based on the `JOURNAL_FILE_ENABLE` / `JOURNAL_FILE_OUTPUT_PATH` env
+    ///    vars.  Default (env unset) is **no projection attached** — the
+    ///    EventLog is the only canonical store and chapter content is read
+    ///    back via MCP tools.
     ///
-    /// For tests that need to suppress FileProjection I/O, use
-    /// [`new_with_config`](Self::new_with_config) (available under `#[cfg(test)]`).
+    /// For tests that need deterministic FileProjection control, use
+    /// [`new_with_file_attach`](Self::new_with_file_attach) /
+    /// [`new_without_file_attach`](Self::new_without_file_attach)
+    /// (available under `#[cfg(test)]`).
     ///
     /// # Errors
     ///
     /// Returns an error if the schema registry or database cannot be opened.
     pub fn new(project_root: PathBuf) -> anyhow::Result<Self> {
-        Self::build(project_root, true)
+        Self::build(project_root, FileProjectionMode::FromEnv)
     }
 
-    /// Internal constructor shared by `new` and the test-only `new_with_config`.
+    /// Internal constructor shared by `new` and the test-only ctors.
     ///
-    /// When `attach_file_projection` is `true`, a [`FileProjection`](journal_mcp_core::FileProjection)
-    /// is attached at `{project_root}/journal.md` (root).  When `false`, no projection
-    /// is attached.
+    /// `mode` controls whether and where the startup-time `FileProjection` is
+    /// attached.  See [`FileProjectionMode`] for the three variants.
     ///
     /// # Errors
     ///
     /// Returns an error if the schema registry or database cannot be opened.
-    fn build(project_root: PathBuf, attach_file_projection: bool) -> anyhow::Result<Self> {
+    fn build(project_root: PathBuf, mode: FileProjectionMode) -> anyhow::Result<Self> {
         let db_dir = project_root.join("workspace");
         // Scan for stale .bak.* files before opening the database.
         let stale = Self::detect_stale_bak_files(&db_dir);
@@ -440,19 +540,13 @@ impl JournalMcpServer {
             );
         }
 
-        let (core, db_path, _file_projection_path) =
-            Self::build_core(&project_root, attach_file_projection)?;
+        let (core, db_path, file_projection_path) = Self::build_core(&project_root, mode)?;
         // After build_core succeeds, the project_root (and its workspace
         // subdir) exists, so `canonicalize` resolves all symlinks (e.g. on
         // macOS where TempDir lives under `/var` → `/private/var`).  This
         // canonical form is what `resolve_core` compares against, so storing
         // it here makes the per-call override short-circuit work reliably.
         let canonical_root = std::fs::canonicalize(&project_root).unwrap_or(project_root);
-        // Derive file_projection_path from the already-canonicalized root.
-        // We cannot call canonicalize on journal.md itself because the file does
-        // not exist yet at startup; using canonical_root.join avoids the
-        // /var → /private/var symlink mismatch on macOS.
-        let file_projection_path = canonical_root.join("journal.md");
 
         let schema_registry_path = canonical_root.join(".journal").join("schemas");
 
@@ -482,19 +576,21 @@ impl JournalMcpServer {
     ///
     /// Shared by the startup-time constructor (`build`) and the per-call
     /// lazy-cache populator (`resolve_core`).  Each call opens an independent
-    /// SQLite handle at `{project_root}/workspace/.journal.db` and (optionally)
-    /// attaches a `FileProjection` rendering to
-    /// `{project_root}/journal.md` (root).
+    /// SQLite handle at `{project_root}/workspace/.journal.db` and may attach
+    /// a `FileProjection` according to `mode`.
     ///
-    /// Returns `(JournalCore, db_path, file_projection_path)`.
+    /// Returns `(JournalCore, db_path, file_projection_path)` where
+    /// `file_projection_path` is `Some(path)` only when a projection was
+    /// attached, and `None` otherwise (the v0.4.0 default unless
+    /// `JOURNAL_FILE_ENABLE` is set).
     ///
     /// # Errors
     ///
     /// Returns an error if the schema registry or database cannot be opened.
     fn build_core(
         project_root: &Path,
-        attach_file_projection: bool,
-    ) -> anyhow::Result<(journal_mcp_core::JournalCore, PathBuf, PathBuf)> {
+        mode: FileProjectionMode,
+    ) -> anyhow::Result<(journal_mcp_core::JournalCore, PathBuf, Option<PathBuf>)> {
         let registry = journal_mcp_core::SchemaRegistry::with_project_local(project_root)?;
 
         let db_dir = project_root.join("workspace");
@@ -502,20 +598,40 @@ impl JournalMcpServer {
         std::fs::create_dir_all(&db_dir)?;
         let db_path = db_dir.join(".journal.db");
 
-        // Default FileProjection output path: <project_root>/journal.md (root).
-        // db_dir is kept for .journal.db placement only.
-        let journal_md = project_root.join("journal.md");
+        // Resolve the FileProjection target path (or decide not to attach).
+        let resolved_path: Option<PathBuf> = match mode {
+            FileProjectionMode::FromEnv => {
+                let enable_set = std::env::var_os("JOURNAL_FILE_ENABLE").is_some();
+                let path_env = std::env::var_os("JOURNAL_FILE_OUTPUT_PATH");
+                let (path, warn_msg) =
+                    resolve_file_projection_path(project_root, enable_set, path_env.as_deref());
+                if let Some(msg) = warn_msg {
+                    tracing::warn!(target: "journal::startup", "{msg}");
+                }
+                path
+            }
+            #[cfg(test)]
+            FileProjectionMode::ForceAttachAt(p) => {
+                if p.is_absolute() {
+                    Some(p)
+                } else {
+                    Some(project_root.join(p))
+                }
+            }
+            #[cfg(test)]
+            FileProjectionMode::ForceDisabled => None,
+        };
 
         // Clone the registry before consuming it; FileProjection needs an Arc.
         let registry_arc = std::sync::Arc::new(registry.clone());
         let mut core = journal_mcp_core::JournalCore::open(&db_path, registry)?;
 
-        if attach_file_projection {
-            let proj = journal_mcp_core::FileProjection::new(journal_md.clone(), registry_arc);
+        if let Some(ref path) = resolved_path {
+            let proj = journal_mcp_core::FileProjection::new(path.clone(), registry_arc);
             core.add_projection(proj);
         }
 
-        Ok((core, db_path, journal_md))
+        Ok((core, db_path, resolved_path))
     }
 
     /// Apply pagination (offset + limit) to a `Vec<T>`.
@@ -544,8 +660,9 @@ impl JournalMcpServer {
     ///   `project_root`, return the default handle (no extra DB open).  Otherwise
     ///   look up the path in the per-project lazy cache (`extra_cores`); on cache
     ///   miss, build a fresh `JournalCore` rooted at that path, insert it into
-    ///   the cache, and return its handle.  `FileProjection` is always attached
-    ///   for cached cores.
+    ///   the cache, and return its handle.  The cached core uses the same
+    ///   [`FileProjectionMode::FromEnv`] policy as the startup core, so the env
+    ///   vars apply uniformly across all per-project cores.
     ///
     /// Concurrency: holds the `extra_cores` HashMap lock only across the
     /// insert/lookup; the lock guard is dropped before returning the cloned
@@ -575,31 +692,46 @@ impl JournalMcpServer {
         if let Some(c) = extra.get(&canonical) {
             return Ok(c.clone());
         }
-        let (core, _db_path, _file_projection_path) = Self::build_core(&canonical, true)?;
+        let (core, _db_path, _file_projection_path) =
+            Self::build_core(&canonical, FileProjectionMode::FromEnv)?;
         let handle = Arc::new(Mutex::new(core));
         extra.insert(canonical, handle.clone());
         Ok(handle)
     }
 
-    /// Test-only constructor with explicit FileProjection control.
+    /// Test-only constructor that force-attaches a `FileProjection` at the
+    /// given path, ignoring env vars.
     ///
-    /// Delegates to [`build`](Self::build) with the given `attach_file_projection`
-    /// flag.  Pass `false` to suppress projection I/O in unit tests so that all
-    /// file paths remain inside a `TempDir` (Crux #3 test-isolation requirement).
-    ///
-    /// This method is intentionally hidden from production builds.  If production
-    /// code needs FileProjection control in the future, promote `build` to `pub`
-    /// at that point (YAGNI for now).
+    /// Relative paths resolve against `project_root`; absolute paths are
+    /// used as-is.  Use this when a test needs deterministic FileProjection
+    /// I/O without touching `JOURNAL_FILE_ENABLE` / `JOURNAL_FILE_OUTPUT_PATH`
+    /// (which would race with other parallel tests).
     ///
     /// # Errors
     ///
     /// Returns an error if the schema registry or database cannot be opened.
     #[cfg(test)]
-    pub(crate) fn new_with_config(
+    pub(crate) fn new_with_file_attach(
         project_root: PathBuf,
-        attach_file_projection: bool,
+        output_path: PathBuf,
     ) -> anyhow::Result<Self> {
-        Self::build(project_root, attach_file_projection)
+        Self::build(project_root, FileProjectionMode::ForceAttachAt(output_path))
+    }
+
+    /// Test-only constructor that force-disables the startup `FileProjection`,
+    /// ignoring env vars.
+    ///
+    /// Use this when a test needs to verify behaviour without any file I/O
+    /// (e.g. tool-registration tests, schema tests).  All file paths remain
+    /// inside the `TempDir` regardless of env state (Crux #3 test-isolation
+    /// requirement).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the schema registry or database cannot be opened.
+    #[cfg(test)]
+    pub(crate) fn new_without_file_attach(project_root: PathBuf) -> anyhow::Result<Self> {
+        Self::build(project_root, FileProjectionMode::ForceDisabled)
     }
 
     /// Scan `db_dir` for stale backup files left by a previous migration.
@@ -1259,17 +1391,23 @@ impl JournalMcpServer {
         Ok(json)
     }
 
-    /// Attach a named projection (currently only `"file"` is supported, and it
-    /// is auto-attached at server startup).
+    /// Attach a named projection.
     ///
-    /// Attaching `"file"` is idempotent — the server returns a success message
-    /// since the `FileProjection` is always active from startup.  Requesting
-    /// any other name returns an error.
+    /// As of v0.4.0 the startup auto-attach for `"file"` was removed; the
+    /// projection is now attached only when `JOURNAL_FILE_ENABLE` is set at
+    /// startup.  Runtime attach via this tool is currently a no-op
+    /// acknowledgement — to actually re-route file output at runtime, restart
+    /// the server with the appropriate env vars or use the per-call
+    /// `output_path` argument of `journal_projection_rebuild`.  Full runtime
+    /// re-attach support is tracked separately (carry from v0.4.0).
+    /// Requesting any name other than `"file"` returns an error.
     #[tool(
         name = "journal_projection_attach",
-        description = "Attach a named projection. Currently only 'file' is supported \
-                       and is always auto-attached at startup (idempotent). \
-                       Other names return an error.",
+        description = "Attach a named projection. Currently only 'file' is recognised. \
+                       Runtime attach is acknowledged but does not re-route output; \
+                       set JOURNAL_FILE_ENABLE at server startup, or use the \
+                       per-call output_path argument of journal_projection_rebuild \
+                       for one-shot writes. Other names return an error.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1284,9 +1422,15 @@ impl JournalMcpServer {
         match params.name.as_str() {
             "file" => {
                 tracing::info!(
-                    "journal_projection_attach: 'file' projection already auto-attached at startup"
+                    "journal_projection_attach: 'file' acknowledged \
+                     (runtime re-attach is a no-op; set JOURNAL_FILE_ENABLE at startup \
+                     or use journal_projection_rebuild's output_path argument)"
                 );
-                Ok("file projection already auto-attached at startup".to_string())
+                Ok(
+                    "file projection acknowledged (set JOURNAL_FILE_ENABLE at startup \
+                    or use journal_projection_rebuild's output_path argument)"
+                        .to_string(),
+                )
             }
             other => {
                 tracing::warn!(
@@ -1658,12 +1802,14 @@ mod tests {
 
     /// Build a `JournalMcpServer` backed by a temporary directory.
     ///
-    /// FileProjection is not attached (`attach_file_projection = false`) so that
-    /// tests do not touch the real filesystem outside the `TempDir` (Crux #3).
+    /// FileProjection is not attached (force-disabled) so that tests do not
+    /// touch the real filesystem outside the `TempDir` (Crux #3) and do not
+    /// race against ambient `JOURNAL_FILE_ENABLE` / `JOURNAL_FILE_OUTPUT_PATH`
+    /// env state.
     fn make_server(tmp: &tempfile::TempDir) -> JournalMcpServer {
-        JournalMcpServer::new_with_config(tmp.path().to_path_buf(), false)
-            // SAFETY: TempDir is kept alive by caller; new_with_config() creates workspace/ subdir.
-            .expect("JournalMcpServer::new_with_config should succeed in temp dir")
+        JournalMcpServer::new_without_file_attach(tmp.path().to_path_buf())
+            // SAFETY: TempDir is kept alive by caller; the ctor creates the workspace/ subdir.
+            .expect("JournalMcpServer::new_without_file_attach should succeed in temp dir")
     }
 
     /// T1 (property) — four lifecycle tools are registered in the tool_router.
@@ -1948,82 +2094,106 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // ST7/ST3 isolation tests — new_with_config / TempDir-only path guarantee
+    // Test-only constructor isolation tests — TempDir-only path guarantee
     // -----------------------------------------------------------------------
 
-    /// T1 (property) — `new_with_config(_, false)` succeeds and returns a
+    /// T1 (property) — `new_without_file_attach` succeeds and returns a
     /// working server with no FileProjection attached.
     ///
     /// Verifies Crux #3: test-only constructor must succeed and all file paths
     /// must remain inside the TempDir (no real journal.md touched).
     #[test]
-    fn test_new_with_config_no_fp_succeeds() {
+    fn test_new_without_file_attach_succeeds() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
-        let result = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), false);
+        let result = JournalMcpServer::new_without_file_attach(tmp.path().to_path_buf());
         assert!(
             result.is_ok(),
-            "new_with_config(_, false) should return Ok; got: {:?}",
+            "new_without_file_attach should return Ok; got: {:?}",
             result.err()
         );
         // The workspace directory must have been created inside TempDir.
         let workspace = tmp.path().join("workspace");
         assert!(
             workspace.exists(),
-            "workspace dir should be created inside TempDir by new_with_config"
+            "workspace dir should be created inside TempDir by ctor"
         );
-        // Default FileProjection output = <project_root>/journal.md (root).
-        // When attach_file_projection=false, journal.md must NOT be created at root
-        // (no projection is attached, no file should be written).
+        // No projection is attached, so no journal.md file should exist anywhere.
         let root_journal_md = tmp.path().join("journal.md");
         assert!(
             !root_journal_md.exists(),
-            "journal.md must not be created when attach_file_projection=false; \
+            "journal.md must not be created when no projection attached; \
              path: {root_journal_md:?}"
         );
-        // workspace/journal.md (old default, pre-v0.3.0) also must not be created.
         let workspace_journal_md = tmp.path().join("workspace").join("journal.md");
         assert!(
             !workspace_journal_md.exists(),
             "workspace/journal.md must not be created; path: {workspace_journal_md:?}"
         );
-    }
-
-    /// T2 (boundary) — `new_with_config(_, true)` attaches FileProjection and
-    /// creates `journal.md` (root) inside TempDir on first rebuild.
-    ///
-    /// When `attach_file_projection = true` the projection is wired up but the
-    /// file is only written on explicit `journal_projection_rebuild`.  Verifies
-    /// the server can be constructed successfully with projection attached.
-    #[test]
-    fn test_new_with_config_with_fp_constructs_ok() {
-        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
-        let result = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), true);
+        // file_projection_path on the server struct must reflect that no
+        // projection was attached.
+        let server = result.expect("just asserted Ok");
         assert!(
-            result.is_ok(),
-            "new_with_config(_, true) should return Ok; got: {:?}",
-            result.err()
+            server.file_projection_path.is_none(),
+            "file_projection_path must be None when no projection attached; \
+             got: {:?}",
+            server.file_projection_path
         );
     }
 
-    /// T3 (error path) — `new_with_config` propagates an error when the project
-    /// root cannot have its workspace subdir created (invalid nested path).
-    ///
-    /// Uses a path that cannot be created because its parent is a file, not
-    /// a directory, triggering `std::fs::create_dir_all` failure.
+    /// T2 (boundary) — `new_with_file_attach(_, path)` attaches a
+    /// FileProjection at the given path; server constructs successfully and
+    /// file_projection_path reflects the resolved absolute path.
     #[test]
-    fn test_new_with_config_returns_err_on_bad_root() {
+    fn test_new_with_file_attach_constructs_ok() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let target = tmp.path().join("workspace").join("journal.md");
+        let result =
+            JournalMcpServer::new_with_file_attach(tmp.path().to_path_buf(), target.clone());
+        assert!(
+            result.is_ok(),
+            "new_with_file_attach should return Ok; got: {:?}",
+            result.err()
+        );
+        let server = result.expect("just asserted Ok");
+        assert_eq!(
+            server.file_projection_path.as_deref(),
+            Some(target.as_path()),
+            "file_projection_path must equal the force-attached path"
+        );
+    }
+
+    /// T3 (relative path) — `new_with_file_attach` with a relative path
+    /// resolves against `project_root`.
+    #[test]
+    fn test_new_with_file_attach_relative_path_resolves_to_project_root() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
+        let server = JournalMcpServer::new_with_file_attach(
+            tmp.path().to_path_buf(),
+            PathBuf::from("workspace/journal.md"),
+        )
+        .expect("ctor should succeed");
+        let expected = tmp.path().join("workspace").join("journal.md");
+        assert_eq!(
+            server.file_projection_path.as_deref(),
+            Some(expected.as_path()),
+            "relative path must resolve against project_root"
+        );
+    }
+
+    /// T4 (error path) — `new_without_file_attach` propagates an error when
+    /// the project root cannot have its workspace subdir created (invalid
+    /// nested path).
+    #[test]
+    fn test_new_without_file_attach_returns_err_on_bad_root() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
         // Create a regular file where `workspace` would need to be a directory.
         let blocker = tmp.path().join("workspace");
         std::fs::write(&blocker, b"blocking file").expect("write should succeed");
-        // Now attempt to use `workspace/subpath` as the project root — the
-        // `workspace` segment is a file, so `create_dir_all` of its "workspace"
-        // child must fail.
         let nested_root = blocker.join("subpath");
-        let result = JournalMcpServer::new_with_config(nested_root, false);
+        let result = JournalMcpServer::new_without_file_attach(nested_root);
         assert!(
             result.is_err(),
-            "new_with_config should return Err when workspace dir cannot be created"
+            "ctor should return Err when workspace dir cannot be created"
         );
     }
 
@@ -2187,8 +2357,9 @@ mod tests {
             std::fs::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().to_path_buf());
         let db_path = canonical_root.join("workspace").join(".journal.db");
         let schema_registry_path = canonical_root.join(".journal").join("schemas");
-        // Default FileProjection output path = <project_root>/journal.md (root).
-        let file_projection_path = canonical_root.join("journal.md");
+        // v0.4.0 default FileProjection output path when env-enabled
+        // (verifying both the Some(absolute) shape and the new default location).
+        let file_projection_path = canonical_root.join("workspace").join("journal.md");
 
         let result = JournalInfoResult {
             project_root: canonical_root.clone(),
@@ -2209,7 +2380,7 @@ mod tests {
             version: env!("CARGO_PKG_VERSION").to_string(),
             startup_time: "2026-01-01T00:00:00Z".to_string(),
             env_journal_project_root: None,
-            file_projection_path: file_projection_path.clone(),
+            file_projection_path: Some(file_projection_path.clone()),
         };
 
         // All 10 fields must be present (compile-time: struct literal with all fields).
@@ -2239,10 +2410,14 @@ mod tests {
             "schema_registry_path must be absolute, got: {:?}",
             result.schema_registry_path
         );
+        // file_projection_path is Option<PathBuf> in v0.4.0.
+        let fp = result
+            .file_projection_path
+            .as_deref()
+            .expect("Some(path) provided in this test case");
         assert!(
-            result.file_projection_path.is_absolute(),
-            "file_projection_path must be absolute, got: {:?}",
-            result.file_projection_path
+            fp.is_absolute(),
+            "file_projection_path (when Some) must be absolute, got: {fp:?}"
         );
         // version must be non-empty
         assert!(!result.version.is_empty(), "version must be non-empty");
@@ -2280,98 +2455,85 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // FileProjection output-path config tests
+    // resolve_file_projection_path tests (pure-function env-resolution logic)
     // -----------------------------------------------------------------------
 
-    /// T1 (default = root) — after open + close, `<project_root>/journal.md`
-    /// is generated and `workspace/journal.md` is NOT generated.
-    ///
-    /// BREAKING change from v0.2.x where the default was `workspace/journal.md`.
-    #[tokio::test]
-    async fn test_fp_default_path_is_root() {
-        let tmp = tempfile::TempDir::new().expect("TempDir::new");
-        // Build server with FileProjection attached (attach=true).
-        let server = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), true)
-            .expect("new_with_config(true)");
+    /// (1) ENABLE unset + PATH unset → no attach, no warning.
+    #[test]
+    fn test_resolve_file_projection_path_neither_set() {
+        let root = PathBuf::from("/tmp/proj");
+        let (resolved, warn) = resolve_file_projection_path(&root, false, None);
+        assert_eq!(resolved, None);
+        assert_eq!(warn, None);
+    }
 
-        // Open a chapter, close it — this triggers FileProjection write.
-        use rmcp::handler::server::wrapper::Parameters;
-        let chapter_id = {
-            let params = JournalOpenChapterParams {
-                name: "t1-test-chapter".to_string(),
-                schema_id: "ytk-canonical-v1".to_string(),
-                project_root: None,
-            };
-            // journal_open_chapter returns Ok(id.0) — a plain UUID string, not JSON.
-            server
-                .journal_open_chapter(Parameters(params))
-                .await
-                .expect("open_chapter should succeed")
-                .trim()
-                .to_string()
-        };
-
-        // Append required sections.
-        for section in &["Verified", "Done", "Decided", "Not Done", "Issues touched"] {
-            let params = JournalAppendSectionParams {
-                chapter_id: chapter_id.clone(),
-                section_name: section.to_string(),
-                body: format!("- {section} content"),
-                project_root: None,
-            };
-            server
-                .journal_append_section(Parameters(params))
-                .await
-                .expect("append_section should succeed");
-        }
-
-        // Close the chapter.
-        let close_params = JournalCloseChapterParams {
-            chapter_id: chapter_id.clone(),
-            project_root: None,
-        };
-        server
-            .journal_close_chapter(Parameters(close_params))
-            .await
-            .expect("close_chapter should succeed");
-
-        // ST7: close_chapter does NOT auto-dispatch FileProjection.
-        // We must call journal_projection_rebuild explicitly.
-        let rebuild_params = JournalProjectionRebuildParams {
-            name: "file".to_string(),
-            project_root: None,
-            output_path: None,
-        };
-        server
-            .journal_projection_rebuild(Parameters(rebuild_params))
-            .await
-            .expect("journal_projection_rebuild should succeed");
-
-        // Assert: <project_root>/journal.md (root) must exist after explicit rebuild.
-        let root_journal = tmp.path().join("journal.md");
-        assert!(
-            root_journal.exists(),
-            "journal.md must be created at <project_root>/journal.md (root); \
-             checked: {root_journal:?}"
+    /// (2) ENABLE set + PATH unset → default `<project_root>/workspace/journal.md`.
+    #[test]
+    fn test_resolve_file_projection_path_enable_only_uses_default() {
+        let root = PathBuf::from("/tmp/proj");
+        let (resolved, warn) = resolve_file_projection_path(&root, true, None);
+        assert_eq!(
+            resolved,
+            Some(PathBuf::from("/tmp/proj/workspace/journal.md"))
         );
+        assert_eq!(warn, None);
+    }
 
-        // Assert: workspace/journal.md (old default) must NOT exist.
-        let ws_journal = tmp.path().join("workspace").join("journal.md");
+    /// (3) ENABLE set + relative PATH → resolved against `project_root`.
+    #[test]
+    fn test_resolve_file_projection_path_relative_resolves_to_root() {
+        let root = PathBuf::from("/tmp/proj");
+        let path_env = std::ffi::OsString::from("custom/journal.md");
+        let (resolved, warn) =
+            resolve_file_projection_path(&root, true, Some(path_env.as_os_str()));
+        assert_eq!(resolved, Some(PathBuf::from("/tmp/proj/custom/journal.md")));
+        assert_eq!(warn, None);
+    }
+
+    /// (4) ENABLE set + absolute PATH → used as-is.
+    #[test]
+    fn test_resolve_file_projection_path_absolute_is_used_as_is() {
+        let root = PathBuf::from("/tmp/proj");
+        let path_env = std::ffi::OsString::from("/var/log/journal.md");
+        let (resolved, warn) =
+            resolve_file_projection_path(&root, true, Some(path_env.as_os_str()));
+        assert_eq!(resolved, Some(PathBuf::from("/var/log/journal.md")));
+        assert_eq!(warn, None);
+    }
+
+    /// (5) ENABLE unset + PATH set → no attach, strict warning surfaced.
+    #[test]
+    fn test_resolve_file_projection_path_path_set_but_enable_unset_warns() {
+        let root = PathBuf::from("/tmp/proj");
+        let path_env = std::ffi::OsString::from("custom/journal.md");
+        let (resolved, warn) =
+            resolve_file_projection_path(&root, false, Some(path_env.as_os_str()));
+        assert_eq!(
+            resolved, None,
+            "PATH alone must not attach a projection (strict gate)"
+        );
+        let msg = warn.expect("warn message must be produced when PATH is set without ENABLE");
         assert!(
-            !ws_journal.exists(),
-            "workspace/journal.md must NOT be created (v0.3.0 default is root); \
-             checked: {ws_journal:?}"
+            msg.contains("JOURNAL_FILE_ENABLE"),
+            "warn message should mention the env var; got: {msg}"
         );
     }
 
-    /// T2 (per-call output_path relative) — `journal_projection_rebuild` with
-    /// `output_path=Some("workspace/journal.md")` writes to workspace/journal.md,
-    /// while the attached default (root journal.md) is NOT re-touched.
+    // -----------------------------------------------------------------------
+    // FileProjection per-call output_path tests (one-shot rebuild)
+    // -----------------------------------------------------------------------
+
+    /// T1 (per-call output_path relative) — `journal_projection_rebuild` with
+    /// `output_path=Some("workspace/journal.md")` writes to workspace/journal.md.
+    /// Uses force-attached projection at a different path; the attached projection
+    /// must NOT be re-touched by the one-shot.
     #[tokio::test]
     async fn test_fp_per_call_relative_output_path() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new");
-        let server = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), true)
-            .expect("new_with_config(true)");
+        let attached = tmp.path().join("custom").join("attached.md");
+        let server =
+            JournalMcpServer::new_with_file_attach(tmp.path().to_path_buf(), attached.clone())
+                .expect("new_with_file_attach");
 
         use rmcp::handler::server::wrapper::Parameters;
 
@@ -2382,7 +2544,6 @@ mod tests {
                 schema_id: "ytk-canonical-v1".to_string(),
                 project_root: None,
             };
-            // journal_open_chapter returns Ok(id.0) — a plain UUID string, not JSON.
             server
                 .journal_open_chapter(Parameters(params))
                 .await
@@ -2410,8 +2571,7 @@ mod tests {
             .await
             .unwrap();
 
-        // ST7: close_chapter does NOT auto-dispatch FileProjection.
-        // Explicitly rebuild to the default (root) path to create journal.md.
+        // Explicit rebuild to the force-attached (custom) path to seed it.
         server
             .journal_projection_rebuild(Parameters(JournalProjectionRebuildParams {
                 name: "file".to_string(),
@@ -2419,15 +2579,13 @@ mod tests {
                 output_path: None,
             }))
             .await
-            .expect("initial rebuild to root journal.md");
+            .expect("initial rebuild to attached path");
 
-        // Record the last-modified time of root journal.md (written by explicit rebuild).
-        let root_journal = tmp.path().join("journal.md");
         assert!(
-            root_journal.exists(),
-            "root journal.md must exist after explicit rebuild"
+            attached.exists(),
+            "attached projection file must exist after explicit rebuild"
         );
-        let mtime_before = std::fs::metadata(&root_journal)
+        let mtime_before = std::fs::metadata(&attached)
             .expect("metadata")
             .modified()
             .ok();
@@ -2457,26 +2615,27 @@ mod tests {
             "workspace/journal.md must be created by per-call rebuild; checked: {ws_journal:?}"
         );
 
-        // root journal.md must NOT have been re-touched (attached projection unchanged).
-        let mtime_after = std::fs::metadata(&root_journal)
+        // Attached projection file must NOT have been re-touched.
+        let mtime_after = std::fs::metadata(&attached)
             .expect("metadata after")
             .modified()
             .ok();
         assert_eq!(
             mtime_before, mtime_after,
-            "root journal.md must not be re-written by one-shot rebuild \
+            "attached projection file must not be re-written by one-shot rebuild \
              (attached projection must be unchanged)"
         );
     }
 
-    /// T3 (per-call output_path absolute) — `journal_projection_rebuild` with
+    /// T2 (per-call output_path absolute) — `journal_projection_rebuild` with
     /// an absolute path writes to that path.
     #[tokio::test]
     async fn test_fp_per_call_absolute_output_path() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new for server");
         let tmp_out = tempfile::TempDir::new().expect("TempDir::new for output");
-        let server = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), true)
-            .expect("new_with_config(true)");
+        // Use no-attach: per-call rebuild does not require an attached projection.
+        let server = JournalMcpServer::new_without_file_attach(tmp.path().to_path_buf())
+            .expect("new_without_file_attach");
 
         use rmcp::handler::server::wrapper::Parameters;
 
@@ -2487,7 +2646,6 @@ mod tests {
                 schema_id: "ytk-canonical-v1".to_string(),
                 project_root: None,
             };
-            // journal_open_chapter returns Ok(id.0) — a plain UUID string, not JSON.
             server
                 .journal_open_chapter(Parameters(params))
                 .await
@@ -2540,17 +2698,20 @@ mod tests {
         );
     }
 
-    /// T4 (journal_info file_projection_path) — `journal_info()` returns
-    /// `file_projection_path` = `<project_root>/journal.md` (absolute).
+    /// T3 (journal_info file_projection_path = Some) — when force-attached,
+    /// `journal_info()` returns `file_projection_path` as the resolved
+    /// absolute path string.
     #[tokio::test]
-    async fn test_fp_journal_info_file_projection_path() {
+    async fn test_fp_journal_info_file_projection_path_attached() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new");
         // Canonicalize to handle macOS /var -> /private/var symlink.
         let canonical_root =
             std::fs::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().to_path_buf());
+        let target = canonical_root.join("workspace").join("journal.md");
 
-        let server = JournalMcpServer::new_with_config(tmp.path().to_path_buf(), true)
-            .expect("new_with_config(true)");
+        let server =
+            JournalMcpServer::new_with_file_attach(tmp.path().to_path_buf(), target.clone())
+                .expect("new_with_file_attach");
 
         let info_json = server
             .journal_info()
@@ -2560,15 +2721,72 @@ mod tests {
 
         let fp_path = info["file_projection_path"]
             .as_str()
-            .expect("file_projection_path must be a string");
+            .expect("file_projection_path must be a string when attached");
 
-        // Must be an absolute path ending with journal.md at root.
-        let expected = canonical_root.join("journal.md");
         assert_eq!(
             std::path::Path::new(fp_path),
-            expected.as_path(),
-            "file_projection_path must be <project_root>/journal.md (root); \
-             expected: {expected:?}, got: {fp_path}"
+            target.as_path(),
+            "file_projection_path must equal the force-attached path; \
+             expected: {target:?}, got: {fp_path}"
+        );
+    }
+
+    /// T4 (journal_info file_projection_path = null) — when no projection is
+    /// attached, `journal_info()` returns `file_projection_path` as JSON null.
+    #[tokio::test]
+    async fn test_fp_journal_info_file_projection_path_none_when_no_attach() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new");
+        let server = JournalMcpServer::new_without_file_attach(tmp.path().to_path_buf())
+            .expect("new_without_file_attach");
+
+        let info_json = server
+            .journal_info()
+            .await
+            .expect("journal_info should succeed");
+        let info: serde_json::Value = serde_json::from_str(&info_json).expect("journal_info JSON");
+
+        assert!(
+            info["file_projection_path"].is_null(),
+            "file_projection_path must be null when no projection is attached; \
+             got: {}",
+            info["file_projection_path"]
+        );
+    }
+
+    /// T5 (runtime journal_projection_attach is a no-op acknowledgement in
+    /// v0.4.0) — calling `journal_projection_attach(name="file")` when no
+    /// projection is attached succeeds with an acknowledgement message but
+    /// does NOT cause a file to be created.
+    #[tokio::test]
+    async fn test_fp_runtime_attach_is_acknowledgement_only() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new");
+        let server = JournalMcpServer::new_without_file_attach(tmp.path().to_path_buf())
+            .expect("new_without_file_attach");
+
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let res = server
+            .journal_projection_attach(Parameters(JournalProjectionAttachParams {
+                name: "file".to_string(),
+                project_root: None,
+            }))
+            .await
+            .expect("attach 'file' should return Ok (acknowledgement)");
+        assert!(
+            res.contains("JOURNAL_FILE_ENABLE") || res.contains("journal_projection_rebuild"),
+            "acknowledgement should hint at the supported re-attach paths; got: {res}"
+        );
+
+        // No file should be created by the acknowledgement alone.
+        let ws_journal = tmp.path().join("workspace").join("journal.md");
+        let root_journal = tmp.path().join("journal.md");
+        assert!(
+            !ws_journal.exists(),
+            "workspace/journal.md must not be created by runtime attach"
+        );
+        assert!(
+            !root_journal.exists(),
+            "<root>/journal.md must not be created by runtime attach"
         );
     }
 }
