@@ -19,6 +19,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.5.0] — 2026-07-02
+
+### Added
+
+- New crate `journal-mcp-rmcp` publishing the MCP transport layer
+  (`ServerHandler`, `#[tool_router]` for the 17 journal tools, stdio wiring)
+  as an SDK, mirroring the outline-mcp v0.9.0+ 3-crate shape
+  (`core` + `rmcp` + `bin`). Consumers embedding the server directly
+  (e.g. lds) can now depend on `journal-mcp-rmcp` instead of re-implementing
+  the tool router and Params structs.
+- Public API surface of `journal-mcp-rmcp`: `run(RunConfig)`,
+  `JournalMcpServer`, `RunConfig { project_root, file_projection }`.
+- `crates/journal-mcp/src/env_resolve.rs` extracted from the binary main
+  as a dedicated env-resolution module (covers 5 tests).
+
+### Changed (BREAKING)
+
+- The `journal-mcp` binary crate no longer exposes the MCP interface layer
+  as a library. `JournalMcpServer`, the 17 Params structs, and the
+  `#[tool_router]` block have moved to the new `journal-mcp-rmcp` crate.
+  Consumers that were importing these symbols from a hypothetical
+  `journal-mcp` library target must now depend on `journal-mcp-rmcp`.
+- `crates/journal-mcp/src/main.rs` is now a 39-line thin entry point that
+  resolves env vars (`JOURNAL_PROJECT_ROOT` / `JOURNAL_FILE_ENABLE` /
+  `JOURNAL_FILE_OUTPUT_PATH`) into a `RunConfig` and delegates to
+  `journal_mcp_rmcp::run`. Env resolution is now the binary's
+  responsibility only; the library receives already-resolved values.
+- `rmcp` workspace dependency bumped `1.5` → `1.7` with the `macros`
+  feature added (required by `#[tool_router]` / `#[tool_handler]`).
+- Workspace version bumped `0.4.0` → `0.5.0`.
+
+### Notes
+
+- 17 MCP tools, wire format, chapter/section semantics, and env-var
+  contract are unchanged. This is a pure crate-boundary refactor.
+- 38 tests preserved verbatim across the split (5 bin + 33 rmcp).
+- Publish order (manual Path B, `journal-mcp-rmcp` is a new crate on
+  crates.io): `journal-mcp-core` → `journal-mcp-rmcp` → `journal-mcp`.
+
 ## [0.4.0] — 2026-06-22
 
 ### Changed (BREAKING)
