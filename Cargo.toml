@@ -2,11 +2,12 @@
 resolver = "2"
 members = [
     "crates/journal-mcp-core",
+    "crates/journal-mcp-rmcp",
     "crates/journal-mcp",
 ]
 
 [workspace.package]
-version      = "0.4.0"
+version      = "0.5.0"
 edition      = "2021"
 license      = "MIT OR Apache-2.0"
 repository   = "https://github.com/ynishi/journal-mcp"
@@ -26,7 +27,7 @@ ulid       = "1"
 rust-embed = "8"
 tracing    = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rmcp       = { version = "1.5", features = ["server", "transport-io"] }
+rmcp       = { version = "1.7", features = ["server", "transport-io", "macros"] }
 schemars   = "1.2"
 tokio-util = "0"
 tempfile   = "3"

@@ -13,19 +13,11 @@ name = "journal-mcp"
 path = "src/main.rs"
 
 [dependencies]
-journal-mcp-core = { version = "0.4.0", path = "../journal-mcp-core" }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-serde_yaml = { workspace = true }
+journal-mcp-rmcp = { version = "0.5.0", path = "../journal-mcp-rmcp" }
 anyhow     = { workspace = true }
-thiserror  = { workspace = true }
 tokio      = { workspace = true }
 tracing    = { workspace = true }
 tracing-subscriber = { workspace = true }
-rmcp       = { workspace = true }
-schemars   = { workspace = true }
-time       = { workspace = true }
-tokio-util = { workspace = true }
 
 [dev-dependencies]
 tempfile   = { workspace = true }

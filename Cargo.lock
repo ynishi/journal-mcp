@@ -530,27 +530,19 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "journal-mcp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
- "journal-mcp-core",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "serde_yaml",
+ "journal-mcp-rmcp",
  "tempfile",
- "thiserror 1.0.69",
- "time",
  "tokio",
- "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "journal-mcp-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "mini-app-core",
@@ -565,6 +557,25 @@ dependencies = [
  "tokio",
  "tracing",
  "ulid",
+]
+
+[[package]]
+name = "journal-mcp-rmcp"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "journal-mcp-core",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
