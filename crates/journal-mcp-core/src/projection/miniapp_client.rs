@@ -126,7 +126,7 @@ impl MiniAppClient for MiniAppCoreClient {
             field: "chapter_id".to_owned(),
             value: serde_json::Value::String(chapter_id.to_owned()),
         };
-        let rows = block_on(self.store.list(Some(1), None, Some(filter))).map_err(|e| {
+        let rows = block_on(self.store.list(Some(1), None, Some(filter), None)).map_err(|e| {
             ProjectionError::Io(std::io::Error::other(format!(
                 "mini-app-core Store::list: {e}"
             )))

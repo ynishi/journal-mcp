@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **rusqlite 0.32 → 0.37 (libsqlite3-sys 0.30 → 0.35)** (workspace dependency) —
+  unifies on the `libsqlite3-sys 0.35` cluster used by ai-store-sqlite 0.7 /
+  rusqlite-isle 0.4 / outline-mcp-rmcp 0.10.x, resolving the
+  `links = "sqlite3"` conflict for downstream projects that combine
+  `journal-mcp-rmcp` with crates on the 0.35 band. Closes #1.
+- `mini-app-core` optional dependency (feature `miniapp-core`) 0.11 → 0.16,
+  which itself moved to rusqlite 0.37; `MiniAppCoreClient` adapted to the
+  new `Store::list` signature (added `order_by` parameter, passed as `None`).
+
 ### Deprecated
 
 ### Removed
