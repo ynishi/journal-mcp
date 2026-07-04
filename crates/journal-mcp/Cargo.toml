@@ -13,7 +13,7 @@ name = "journal-mcp"
 path = "src/main.rs"
 
 [dependencies]
-journal-mcp-rmcp = { version = "0.5.0", path = "../journal-mcp-rmcp" }
+journal-mcp-rmcp = { version = "0.6.0", path = "../journal-mcp-rmcp" }
 anyhow     = { workspace = true }
 tokio      = { workspace = true }
 tracing    = { workspace = true }

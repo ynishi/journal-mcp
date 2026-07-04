@@ -11,6 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.6.0] — 2026-07-05
+
+### Added
+
+### Changed
+
 - **rusqlite 0.32 → 0.37 (libsqlite3-sys 0.30 → 0.35)** (workspace dependency) —
   unifies on the `libsqlite3-sys 0.35` cluster used by ai-store-sqlite 0.7 /
   rusqlite-isle 0.4 / outline-mcp-rmcp 0.10.x, resolving the
