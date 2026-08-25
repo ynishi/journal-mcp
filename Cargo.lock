@@ -677,7 +677,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "journal-mcp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "journal-mcp-rmcp",
@@ -689,7 +689,7 @@ dependencies = [
 
 [[package]]
 name = "journal-mcp-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "mini-app-core",
@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "journal-mcp-rmcp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "axum",

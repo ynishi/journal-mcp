@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.7.0] - 2026-08-25
+
+### Added
+
 - `journal_dump` MCP tool (18th tool): renders the entire journal to a single
   Markdown string (journal.md equivalent) and returns it as the tool result —
   no file is written on the server. Optional `since` (Unix epoch ms) filter
@@ -23,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binary) + `contrib/fly/fly.toml` (single machine + volume,
   `auto_stop_machines = "off"` — SQLite single-writer;
   `JOURNAL_PROJECT_ROOT` on the mounted volume, token via Fly secret).
+- Fly deploy driver `contrib/fly/deploy.sh` (idempotent app/volume/secret
+  setup + deploy + 401/200 smoke, app name via `JOURNAL_FLY_APP`) and
+  `docs/runbooks/fly-io-deploy.md` walkthrough; `.dockerignore` keeps the
+  build context to what the Dockerfile COPYs.
 
 ### Changed
 

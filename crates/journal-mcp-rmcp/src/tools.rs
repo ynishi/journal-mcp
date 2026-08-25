@@ -9,9 +9,10 @@ use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 use crate::request::{
     JournalAppendProgressParams, JournalAppendSectionParams, JournalChapterListParams,
     JournalCloseChapterParams, JournalDumpParams, JournalGrepParams, JournalImportParams,
-    JournalInfoResult, JournalOpenChapterParams, JournalOpenChaptersParams, JournalProgressOfParams,
-    JournalProjectionAttachParams, JournalProjectionDetachParams, JournalProjectionRebuildParams,
-    JournalSchemaListParams, JournalSchemaLoadParams, JournalSchemaShowParams, JournalTailParams,
+    JournalInfoResult, JournalOpenChapterParams, JournalOpenChaptersParams,
+    JournalProgressOfParams, JournalProjectionAttachParams, JournalProjectionDetachParams,
+    JournalProjectionRebuildParams, JournalSchemaListParams, JournalSchemaLoadParams,
+    JournalSchemaShowParams, JournalTailParams,
 };
 use crate::server::JournalMcpServer;
 

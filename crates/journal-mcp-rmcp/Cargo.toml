@@ -11,7 +11,7 @@ keywords = ["mcp", "journal", "history"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-journal-mcp-core = { path = "../journal-mcp-core", version = "0.6.0" }
+journal-mcp-core = { path = "../journal-mcp-core", version = "0.7.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
