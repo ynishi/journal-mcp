@@ -16,9 +16,9 @@ pub mod projection;
 pub mod registry;
 pub mod schema;
 
-pub use core::{JournalCore, JournalError};
+pub use core::{ImportEventsReport, JournalCore, JournalError};
 pub use event_log::{
-    ChapterId, ChapterMeta, ChapterReplay, EventId, EventLog, EventLogError, EventRow,
+    ChapterId, ChapterMeta, ChapterReplay, EventId, EventLog, EventLogError, EventRow, RawEventRow,
 };
 pub use projection::{FileProjection, JournalProjection, ProjectionError};
 pub use registry::{RegistryError, SchemaRegistry};

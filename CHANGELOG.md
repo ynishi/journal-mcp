@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Events-native migration pair — `journal_export_events` / `journal_import_events`
+  MCP tools (tool count 18 → 20). Event-sourcing-aligned replacement for the
+  lossy markdown round-trip when moving history between stores (e.g. an
+  existing local EventLog into a remote `--mcp-http` daemon on Fly.io):
+  - `journal_export_events` serialises the raw `event_log` + `chapter_meta`
+    rows as a `journal-events-v1` JSON string (ULID event ids, `created_at` /
+    `opened_at` / `closed_at` timestamps, and schema ids all preserved).
+    Render-to-string form — no file is written on the server.
+  - `journal_import_events` accepts the payload **inline over the wire** (no
+    server-side file path, unlike `journal_import`), inserts rows in one
+    atomic transaction with **event-id dedup (skip-existing)** — re-running
+    the same import is a no-op; a same-id / different-content row aborts and
+    rolls back the whole batch (`EventLogError::EventConflict`). Existing
+    chapters are never overwritten; projection rebuild stays explicit-only.
+  - `journal-mcp-core`: `JournalCore::export_events` / `import_events`,
+    `ImportEventsReport`, `RawEventRow`, `EventLog::all_event_rows` /
+    `insert_event_row_if_absent` / `insert_chapter_meta_if_absent`,
+    `JournalError::ImportEventsFormat`, `EventLogError::EventConflict`.
+
 ### Changed
 
 ### Deprecated

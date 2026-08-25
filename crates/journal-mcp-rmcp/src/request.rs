@@ -297,6 +297,33 @@ pub struct JournalImportParams {
     pub project_root: Option<String>,
 }
 
+/// Parameters for `journal_export_events`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalExportEventsParams {
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
+}
+
+/// Parameters for `journal_import_events`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalImportEventsParams {
+    /// `journal-events-v1` JSON payload, exactly as returned by
+    /// `journal_export_events` on the source store.  Passed inline over the
+    /// wire — no server-side file path is involved, so a local export can be
+    /// imported into a remote daemon directly.
+    pub content: String,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // JournalInfoResult — return type for the `journal_info` diagnostic tool
 // ---------------------------------------------------------------------------

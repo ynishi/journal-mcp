@@ -131,6 +131,34 @@ pub enum JournalError {
         /// The filesystem path that could not be read.
         path: String,
     },
+
+    /// The events-import payload is not valid `journal-events-v1` JSON.
+    ///
+    /// Returned by [`JournalCore::import_events`] before any write is
+    /// attempted (format gate first, transaction second).
+    #[error("import events format error: {reason}")]
+    ImportEventsFormat {
+        /// Human-readable description of the format violation.
+        reason: String,
+    },
+}
+
+/// Outcome counters returned by [`JournalCore::import_events`].
+///
+/// `*_skipped` counts rows that already existed **identically** in the
+/// destination store (idempotent re-import); a same-id / different-content
+/// row is not a skip but an [`EventLogError::EventConflict`] error that
+/// rolls back the whole batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportEventsReport {
+    /// `chapter_meta` rows newly inserted.
+    pub chapters_inserted: usize,
+    /// `chapter_meta` rows skipped because the chapter already exists.
+    pub chapters_skipped: usize,
+    /// `event_log` rows newly inserted.
+    pub events_inserted: usize,
+    /// `event_log` rows skipped as identical duplicates.
+    pub events_skipped: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,6 +1106,222 @@ impl JournalCore {
     }
 
     // -----------------------------------------------------------------------
+    // Events export / import (journal-events-v1)
+    // -----------------------------------------------------------------------
+
+    /// Export the entire EventLog as a `journal-events-v1` JSON string.
+    ///
+    /// This is the **event-native** counterpart of [`dump_markdown`]: instead
+    /// of a rendered projection (lossy — timestamps, event granularity and
+    /// schema ids are collapsed into markdown), the raw `event_log` rows and
+    /// `chapter_meta` rows are serialised verbatim.  The receiving store
+    /// replays them identically, so `opened_at` / `closed_at` / ULID event
+    /// ids / schema ids all survive the transfer.
+    ///
+    /// Like `dump_markdown`, **no file is written** — the caller decides
+    /// where (and on which machine) to materialize the payload.  Feed the
+    /// string to [`import_events`] on the destination store.
+    ///
+    /// # Payload format (`journal-events-v1`)
+    ///
+    /// ```json
+    /// {
+    ///   "format": "journal-events-v1",
+    ///   "exported_at": 1234567890123,
+    ///   "chapter_meta": [
+    ///     { "chapter_id": "...", "schema_id": "...", "current_state": "...",
+    ///       "opened_at": 123, "closed_at": 456 }
+    ///   ],
+    ///   "events": [
+    ///     { "event_id": "<ULID>", "stream_id": "...", "event_type": "...",
+    ///       "section_name": null, "payload": "...", "previous_id": null,
+    ///       "created_at": 123 }
+    ///   ]
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError::EventLog`] if row enumeration fails.
+    ///
+    /// [`dump_markdown`]: JournalCore::dump_markdown
+    /// [`import_events`]: JournalCore::import_events
+    pub fn export_events(&self) -> Result<String, JournalError> {
+        let mut metas = self.log.all_chapter_metas()?;
+        // all_chapter_metas returns newest first; export oldest first for
+        // stable, human-diffable output.
+        metas.sort_by_key(|m| m.opened_at);
+        let events = self.log.all_event_rows()?;
+
+        let exported_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        let meta_json: Vec<serde_json::Value> = metas
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "chapter_id": m.chapter_id.0,
+                    "schema_id": m.schema_id,
+                    "current_state": m.current_state,
+                    "opened_at": m.opened_at,
+                    "closed_at": m.closed_at,
+                })
+            })
+            .collect();
+        let events_json: Vec<serde_json::Value> = events
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "event_id": e.event_id,
+                    "stream_id": e.stream_id,
+                    "event_type": e.event_type,
+                    "section_name": e.section_name,
+                    "payload": e.payload,
+                    "previous_id": e.previous_id,
+                    "created_at": e.created_at,
+                })
+            })
+            .collect();
+
+        let doc = serde_json::json!({
+            "format": "journal-events-v1",
+            "exported_at": exported_at,
+            "chapter_meta": meta_json,
+            "events": events_json,
+        });
+        Ok(doc.to_string())
+    }
+
+    /// Import a `journal-events-v1` payload (produced by [`export_events`])
+    /// into this store, preserving event ids, timestamps and schema ids.
+    ///
+    /// Idempotency contract (event-id dedup, skip-existing):
+    /// - a row whose `event_id` / `chapter_id` is absent is inserted verbatim;
+    /// - a row that already exists **identically** is skipped (re-running the
+    ///   same import is safe and counts the row in `*_skipped`);
+    /// - an `event_id` that exists with **different** content aborts the whole
+    ///   batch with [`EventLogError::EventConflict`] — all writes roll back.
+    ///
+    /// Existing `chapter_meta` rows are never overwritten (destination wins).
+    /// Projection rebuild is **not** dispatched (Crux #1 explicit-only render
+    /// policy) — call [`rebuild_projection`] afterwards if rendering is needed.
+    /// Rendering also requires the referenced schema ids to be present in the
+    /// destination registry (load them via schema tools before dumping).
+    ///
+    /// # Errors
+    ///
+    /// * [`JournalError::ImportEventsFormat`] — payload is not valid
+    ///   `journal-events-v1` (checked before any write).
+    /// * [`JournalError::EventLog`] — event-id conflict or SQLite failure
+    ///   (the transaction rolls back).
+    ///
+    /// [`export_events`]: JournalCore::export_events
+    /// [`rebuild_projection`]: JournalCore::rebuild_projection
+    pub fn import_events(&mut self, content: &str) -> Result<ImportEventsReport, JournalError> {
+        // ── Format gate (no writes yet) ─────────────────────────────────────
+        let doc: serde_json::Value =
+            serde_json::from_str(content).map_err(|e| JournalError::ImportEventsFormat {
+                reason: format!("not valid JSON: {e}"),
+            })?;
+        let format = doc.get("format").and_then(|v| v.as_str()).unwrap_or("");
+        if format != "journal-events-v1" {
+            return Err(JournalError::ImportEventsFormat {
+                reason: format!("unsupported format '{format}' (expected 'journal-events-v1')"),
+            });
+        }
+
+        fn req_str(v: &serde_json::Value, key: &str, ctx: &str) -> Result<String, JournalError> {
+            v.get(key)
+                .and_then(|x| x.as_str())
+                .map(str::to_owned)
+                .ok_or_else(|| JournalError::ImportEventsFormat {
+                    reason: format!("{ctx}: missing string field '{key}'"),
+                })
+        }
+        fn req_i64(v: &serde_json::Value, key: &str, ctx: &str) -> Result<i64, JournalError> {
+            v.get(key)
+                .and_then(|x| x.as_i64())
+                .ok_or_else(|| JournalError::ImportEventsFormat {
+                    reason: format!("{ctx}: missing integer field '{key}'"),
+                })
+        }
+        fn opt_str(v: &serde_json::Value, key: &str) -> Option<String> {
+            v.get(key).and_then(|x| x.as_str()).map(str::to_owned)
+        }
+
+        let empty = vec![];
+        let metas_json = doc
+            .get("chapter_meta")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        let events_json = doc
+            .get("events")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+
+        let mut metas: Vec<crate::event_log::ChapterMeta> = Vec::with_capacity(metas_json.len());
+        for (i, m) in metas_json.iter().enumerate() {
+            let ctx = format!("chapter_meta[{i}]");
+            metas.push(crate::event_log::ChapterMeta {
+                chapter_id: ChapterId(req_str(m, "chapter_id", &ctx)?),
+                schema_id: req_str(m, "schema_id", &ctx)?,
+                current_state: req_str(m, "current_state", &ctx)?,
+                opened_at: req_i64(m, "opened_at", &ctx)?,
+                closed_at: m.get("closed_at").and_then(|v| v.as_i64()),
+            });
+        }
+        let mut rows: Vec<crate::event_log::RawEventRow> = Vec::with_capacity(events_json.len());
+        for (i, e) in events_json.iter().enumerate() {
+            let ctx = format!("events[{i}]");
+            rows.push(crate::event_log::RawEventRow {
+                event_id: req_str(e, "event_id", &ctx)?,
+                stream_id: req_str(e, "stream_id", &ctx)?,
+                event_type: req_str(e, "event_type", &ctx)?,
+                section_name: opt_str(e, "section_name"),
+                payload: req_str(e, "payload", &ctx)?,
+                previous_id: opt_str(e, "previous_id"),
+                created_at: req_i64(e, "created_at", &ctx)?,
+            });
+        }
+
+        // ── Atomic transaction: chapter_meta first, then events ─────────────
+        let mut report = ImportEventsReport {
+            chapters_inserted: 0,
+            chapters_skipped: 0,
+            events_inserted: 0,
+            events_skipped: 0,
+        };
+        {
+            let tx = self.log.transaction()?;
+            for meta in &metas {
+                if crate::event_log::EventLog::insert_chapter_meta_if_absent(meta, &tx)
+                    .map_err(JournalError::EventLog)?
+                {
+                    report.chapters_inserted += 1;
+                } else {
+                    report.chapters_skipped += 1;
+                }
+            }
+            for row in &rows {
+                if crate::event_log::EventLog::insert_event_row_if_absent(row, &tx)
+                    .map_err(JournalError::EventLog)?
+                {
+                    report.events_inserted += 1;
+                } else {
+                    report.events_skipped += 1;
+                }
+            }
+            tx.commit().map_err(|e| {
+                tracing::warn!(target: "journal::core", error = ?e, "import_events: commit failed");
+                JournalError::EventLog(crate::event_log::EventLogError::Sqlite(e))
+            })?;
+        }
+        Ok(report)
+    }
+
+    // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 
@@ -1677,5 +1921,115 @@ also valid
         // Unknown name is a no-op.
         core.rebuild_projection("NonExistentProjection")
             .expect("rebuild_projection with unknown name should be Ok(())");
+    }
+
+    // -----------------------------------------------------------------------
+    // Events export / import (journal-events-v1)
+    // -----------------------------------------------------------------------
+
+    /// T1 — export_events → import_events round-trip into a fresh store
+    /// preserves chapters, event rows, timestamps, and rendered output.
+    #[test]
+    fn test_export_import_events_roundtrip() {
+        let (mut src, _src_dir) = make_core_for_test();
+        open_and_fill(&mut src, "2026-08-01", true);
+        open_and_fill(&mut src, "2026-08-02", true);
+
+        let payload = src.export_events().expect("export_events should succeed");
+
+        let (mut dst, _dst_dir) = make_core_for_test();
+        let report = dst
+            .import_events(&payload)
+            .expect("import_events should succeed");
+        assert_eq!(report.chapters_inserted, 2);
+        assert_eq!(report.chapters_skipped, 0);
+        assert!(report.events_inserted > 0);
+        assert_eq!(report.events_skipped, 0);
+
+        // Chapter metadata (including opened_at / closed_at) is preserved verbatim.
+        let mut src_metas = src.log.all_chapter_metas().expect("src metas");
+        let mut dst_metas = dst.log.all_chapter_metas().expect("dst metas");
+        src_metas.sort_by(|a, b| a.chapter_id.0.cmp(&b.chapter_id.0));
+        dst_metas.sort_by(|a, b| a.chapter_id.0.cmp(&b.chapter_id.0));
+        assert_eq!(src_metas.len(), dst_metas.len());
+        for (s, d) in src_metas.iter().zip(dst_metas.iter()) {
+            assert_eq!(s.chapter_id, d.chapter_id);
+            assert_eq!(s.schema_id, d.schema_id);
+            assert_eq!(s.current_state, d.current_state);
+            assert_eq!(s.opened_at, d.opened_at, "opened_at must survive transfer");
+            assert_eq!(s.closed_at, d.closed_at, "closed_at must survive transfer");
+        }
+
+        // Rendered projections agree (events are the source of truth).
+        let src_md = src.dump_markdown(None).expect("src dump");
+        let dst_md = dst.dump_markdown(None).expect("dst dump");
+        assert_eq!(src_md, dst_md, "rendered journal must match after transfer");
+    }
+
+    /// T2 (boundary) — re-importing the same payload is a no-op (idempotent
+    /// skip-existing by event_id), and importing into a store that already has
+    /// its own chapters merges without touching them.
+    #[test]
+    fn test_import_events_idempotent_merge() {
+        let (mut src, _src_dir) = make_core_for_test();
+        open_and_fill(&mut src, "2026-08-01", true);
+        let payload = src.export_events().expect("export_events should succeed");
+
+        let (mut dst, _dst_dir) = make_core_for_test();
+        // Destination already has live history of its own.
+        open_and_fill(&mut dst, "2026-08-10-live", true);
+
+        let first = dst.import_events(&payload).expect("first import");
+        assert_eq!(first.chapters_inserted, 1);
+
+        let second = dst.import_events(&payload).expect("second import");
+        assert_eq!(second.chapters_inserted, 0, "re-import inserts nothing");
+        assert_eq!(second.chapters_skipped, 1);
+        assert_eq!(second.events_inserted, 0, "re-import inserts no events");
+        assert!(second.events_skipped > 0);
+
+        // Both the migrated and the live chapter are present.
+        let ids = dst.chapter_ids(None).expect("chapter_ids");
+        assert!(ids.iter().any(|id| id.0 == "2026-08-01"));
+        assert!(ids.iter().any(|id| id.0 == "2026-08-10-live"));
+    }
+
+    /// T3 (error path) — a same-event_id / different-content row aborts the
+    /// batch and rolls back all writes; a bad format is rejected before any
+    /// write.
+    #[test]
+    fn test_import_events_conflict_rolls_back() {
+        let (mut src, _src_dir) = make_core_for_test();
+        open_and_fill(&mut src, "2026-08-01", true);
+        let payload = src.export_events().expect("export_events should succeed");
+
+        // Tamper one event's payload while keeping its event_id.
+        let mut doc: serde_json::Value = serde_json::from_str(&payload).expect("parse");
+        doc["events"][0]["payload"] = serde_json::json!("{\"tampered\":true}");
+        let tampered = doc.to_string();
+
+        let (mut dst, _dst_dir) = make_core_for_test();
+        dst.import_events(&payload).expect("clean import");
+        let before = dst.log.all_event_rows().expect("rows").len();
+
+        let err = dst
+            .import_events(&tampered)
+            .expect_err("tampered import must fail");
+        assert!(
+            err.to_string().contains("event conflict"),
+            "expected EventConflict, got: {err}"
+        );
+        let after = dst.log.all_event_rows().expect("rows").len();
+        assert_eq!(before, after, "conflict must roll back all writes");
+
+        // Format gate: garbage / wrong format rejected before any write.
+        let err = dst
+            .import_events("not json at all")
+            .expect_err("garbage must fail");
+        assert!(err.to_string().contains("format error"));
+        let err = dst
+            .import_events("{\"format\":\"something-else\"}")
+            .expect_err("wrong format must fail");
+        assert!(err.to_string().contains("unsupported format"));
     }
 }

@@ -8,11 +8,11 @@ use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use crate::request::{
     JournalAppendProgressParams, JournalAppendSectionParams, JournalChapterListParams,
-    JournalCloseChapterParams, JournalDumpParams, JournalGrepParams, JournalImportParams,
-    JournalInfoResult, JournalOpenChapterParams, JournalOpenChaptersParams,
-    JournalProgressOfParams, JournalProjectionAttachParams, JournalProjectionDetachParams,
-    JournalProjectionRebuildParams, JournalSchemaListParams, JournalSchemaLoadParams,
-    JournalSchemaShowParams, JournalTailParams,
+    JournalCloseChapterParams, JournalDumpParams, JournalExportEventsParams, JournalGrepParams,
+    JournalImportEventsParams, JournalImportParams, JournalInfoResult, JournalOpenChapterParams,
+    JournalOpenChaptersParams, JournalProgressOfParams, JournalProjectionAttachParams,
+    JournalProjectionDetachParams, JournalProjectionRebuildParams, JournalSchemaListParams,
+    JournalSchemaLoadParams, JournalSchemaShowParams, JournalTailParams,
 };
 use crate::server::JournalMcpServer;
 
@@ -933,6 +933,93 @@ impl JournalMcpServer {
         Ok(serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string()))
     }
 
+    /// Export the entire EventLog as a `journal-events-v1` JSON string.
+    ///
+    /// Event-native counterpart of `journal_dump`: raw `event_log` + `chapter_meta`
+    /// rows are serialised verbatim (ULID event ids, timestamps, schema ids all
+    /// preserved), and **no file is written on the server** — the caller decides
+    /// where to materialize the payload. Feed the result to `journal_import_events`
+    /// on the destination store (e.g. local export → remote daemon import).
+    #[tool(
+        name = "journal_export_events",
+        description = "Export the entire EventLog as a journal-events-v1 JSON string \
+                       (raw event rows + chapter metadata, timestamps and ULID event ids \
+                       preserved). No file is written on the server. Feed the result to \
+                       journal_import_events on another store to migrate/merge history \
+                       losslessly (e.g. local journal into a remote daemon).",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn journal_export_events(
+        &self,
+        Parameters(params): Parameters<JournalExportEventsParams>,
+    ) -> Result<String, String> {
+        let json = {
+            // SAFETY: see journal_open_chapter
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let core = core_handle.lock().unwrap();
+            core.export_events().map_err(|e| {
+                tracing::warn!(error = ?e, "journal_export_events failed");
+                e.to_string()
+            })?
+        }; // guard drops here
+        Ok(json)
+    }
+
+    /// Import a `journal-events-v1` payload into this store.
+    ///
+    /// The payload is passed **inline** (no server-side file path), so a local
+    /// export can be pushed into a remote daemon over the wire. Import is
+    /// idempotent: rows are deduplicated by ULID `event_id` (skip-existing);
+    /// a same-id / different-content row aborts and rolls back the whole batch.
+    /// Existing chapters are never overwritten. Projection rebuild is NOT
+    /// triggered automatically (call `journal_projection_rebuild` explicitly).
+    #[tool(
+        name = "journal_import_events",
+        description = "Import a journal-events-v1 JSON payload (from journal_export_events) \
+                       into this store, preserving event ids, timestamps and schema ids. \
+                       Content is passed inline — works against a remote daemon. Idempotent: \
+                       rows dedup by event_id (identical rows skipped); a same-id row with \
+                       different content aborts and rolls back the whole batch. Returns a JSON \
+                       report {chapters_inserted, chapters_skipped, events_inserted, events_skipped}. \
+                       Does NOT trigger projection rebuild (call journal_projection_rebuild explicitly).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn journal_import_events(
+        &self,
+        Parameters(params): Parameters<JournalImportEventsParams>,
+    ) -> Result<String, String> {
+        let report = {
+            // SAFETY: see journal_open_chapter
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let mut core = core_handle.lock().unwrap();
+            core.import_events(&params.content).map_err(|e| {
+                tracing::warn!(error = ?e, "journal_import_events failed");
+                e.to_string()
+            })?
+        }; // guard drops here — no await across the Mutex
+        Ok(serde_json::json!({
+            "chapters_inserted": report.chapters_inserted,
+            "chapters_skipped": report.chapters_skipped,
+            "events_inserted": report.events_inserted,
+            "events_skipped": report.events_skipped,
+        })
+        .to_string())
+    }
+
     /// Return server runtime state for diagnostic purposes.
     ///
     /// Read-only tool. Returns resolved paths, schema list, server version,
@@ -1093,20 +1180,20 @@ mod tests {
         assert!(workspace.exists(), "workspace should be created by new()");
     }
 
-    /// T3 (error path) — tool_router now returns exactly 18 tools.
+    /// T3 (error path) — tool_router now returns exactly 20 tools.
     ///
-    /// Updated from "exactly 17 tools" (journal_info) to "exactly 18 tools"
-    /// by adding `journal_dump` (render-to-string, remote-mode primitive).
+    /// Updated from 18 to 20 by adding the events-native migration pair
+    /// (`journal_export_events` / `journal_import_events`).
     ///
-    /// Verifies Crux #1: all 18 tools are wired into the single `#[tool_router]` block.
+    /// Verifies Crux #1: all 20 tools are wired into the single `#[tool_router]` block.
     #[test]
-    fn test_st7_exactly_seventeen_tools() {
+    fn test_exact_tool_count() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
         let server = make_server(&tmp);
         let count = server.tool_router.list_all().len();
         assert_eq!(
-            count, 18,
-            "tool_router should have exactly 18 tools (Crux #1), got {count}"
+            count, 20,
+            "tool_router should have exactly 20 tools (Crux #1), got {count}"
         );
     }
 
@@ -1213,7 +1300,7 @@ mod tests {
     // ST3 integration tests — Crux #1 final: 15 tool full registration assert
     // -----------------------------------------------------------------------
 
-    /// Canonical spelling of all 18 MCP tools in the tool_router.
+    /// Canonical spelling of all 20 MCP tools in the tool_router.
     ///
     /// This constant is the authoritative list.  Changing this list is a
     /// Crux #1 or Crux #2 violation and requires human review.
@@ -1241,24 +1328,27 @@ mod tests {
         "journal_projection_rebuild",
         // ST7: import tool (1)
         "journal_import",
+        // events-native migration pair (2)
+        "journal_export_events",
+        "journal_import_events",
         // journal_info: diagnostic tool (1)
         "journal_info",
     ];
 
-    /// T1 (property) — Crux #1 final: all 18 tools are registered in the
+    /// T1 (property) — Crux #1 final: all 20 tools are registered in the
     /// single `#[tool_router] impl JournalMcpServer` block.
     ///
     /// This is the primary acceptance test for ST7 as a whole.
     #[test]
-    fn test_all_seventeen_tools_registered() {
+    fn test_all_tools_registered() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
         let server = make_server(&tmp);
         let tools = server.tool_router.list_all();
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert_eq!(
             tool_names.len(),
-            18,
-            "exactly 18 tools must be registered (Crux #1); got: {tool_names:?}"
+            20,
+            "exactly 20 tools must be registered (Crux #1); got: {tool_names:?}"
         );
         for &name in EXPECTED_TOOLS {
             assert!(

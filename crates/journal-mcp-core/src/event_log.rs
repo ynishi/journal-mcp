@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use ulid::Ulid;
 
 // ─────────────────────────── Error type ────────────────────────────────────
@@ -40,6 +40,18 @@ pub enum EventLogError {
         current: String,
         /// The state that was attempted.
         attempted: String,
+    },
+
+    /// An events-import row carries an `event_id` that already exists in this
+    /// store with **different** content.
+    ///
+    /// Identical rows are skipped silently (idempotent re-import); only a
+    /// same-id / different-content pair is an integrity violation, and the
+    /// whole import transaction is rolled back when it is detected.
+    #[error("event conflict: event_id={event_id} already exists with different content")]
+    EventConflict {
+        /// The colliding event identifier.
+        event_id: String,
     },
 }
 
@@ -109,6 +121,30 @@ pub struct ChapterReplay {
     pub meta: ChapterMeta,
     /// Events ordered by `event_id` (ULID lexicographic = time order).
     pub events: Vec<EventRow>,
+}
+
+/// A verbatim `event_log` row (including `stream_id`), used by the
+/// events-native export/import path.
+///
+/// Unlike [`EventRow`] (a per-chapter replay view that omits `stream_id`),
+/// this struct mirrors the physical table column-for-column so a row can be
+/// transferred to another store and inserted without loss.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawEventRow {
+    /// Unique event identifier (ULID) — the idempotency/dedup key.
+    pub event_id: String,
+    /// Stream the event belongs to (chapter_id, or migration_id for `import` events).
+    pub stream_id: String,
+    /// Event type string, e.g. `"open"`, `"section_append"`, `"close"`, `"import"`.
+    pub event_type: String,
+    /// Section name, present only for `section_append` events.
+    pub section_name: Option<String>,
+    /// JSON payload for the event.
+    pub payload: String,
+    /// Previous event in a correction chain, or `None`.
+    pub previous_id: Option<String>,
+    /// Unix epoch milliseconds when the event was created (preserved on transfer).
+    pub created_at: i64,
 }
 
 // ─────────────────────────── DDL + PRAGMA constants ─────────────────────────
@@ -812,5 +848,172 @@ impl EventLog {
         let mut hasher = DefaultHasher::new();
         content.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
+    }
+
+    // ──────────────────── events export / import API ────────────────────
+
+    /// Return every `event_log` row verbatim, ordered by `event_id`
+    /// (ULID lexicographic = time order).
+    ///
+    /// This is the raw-transfer source for [`JournalCore::export_events`]:
+    /// rows are exported exactly as stored — including first-class `import`
+    /// events — so a destination store replays them identically to the
+    /// source (event = source of truth; projections are derived).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventLogError::Sqlite`] on SQL failure.
+    pub fn all_event_rows(&self) -> Result<Vec<RawEventRow>, EventLogError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT event_id, stream_id, event_type, section_name, payload, previous_id, created_at
+                   FROM event_log
+                  ORDER BY event_id",
+            )
+            .map_err(|e| {
+                tracing::warn!(error = ?e, "all_event_rows: prepare failed");
+                EventLogError::Sqlite(e)
+            })?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(RawEventRow {
+                    event_id: row.get(0)?,
+                    stream_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    section_name: row.get(3)?,
+                    payload: row.get(4)?,
+                    previous_id: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })
+            .map_err(EventLogError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                tracing::warn!(error = ?e, "all_event_rows: collecting rows failed");
+                EventLogError::Sqlite(e)
+            })?;
+        Ok(rows)
+    }
+
+    /// Insert a raw event row inside `tx` unless an identical row already exists.
+    ///
+    /// Idempotency contract (events-native import):
+    /// - `event_id` absent → row is inserted, returns `Ok(true)`.
+    /// - `event_id` present with **identical** content → skipped, returns `Ok(false)`.
+    /// - `event_id` present with **different** content → returns
+    ///   [`EventLogError::EventConflict`]; the caller's transaction rolls back.
+    ///
+    /// # Errors
+    ///
+    /// [`EventLogError::EventConflict`] on a same-id / different-content pair;
+    /// [`EventLogError::Sqlite`] on SQL failure.
+    pub fn insert_event_row_if_absent(
+        row: &RawEventRow,
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<bool, EventLogError> {
+        let existing: Option<RawEventRow> = tx
+            .query_row(
+                "SELECT event_id, stream_id, event_type, section_name, payload, previous_id, created_at
+                   FROM event_log
+                  WHERE event_id = ?1",
+                rusqlite::params![row.event_id],
+                |r| {
+                    Ok(RawEventRow {
+                        event_id: r.get(0)?,
+                        stream_id: r.get(1)?,
+                        event_type: r.get(2)?,
+                        section_name: r.get(3)?,
+                        payload: r.get(4)?,
+                        previous_id: r.get(5)?,
+                        created_at: r.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| {
+                tracing::warn!(error = ?e, event_id = %row.event_id, "insert_event_row_if_absent: SELECT failed");
+                EventLogError::Sqlite(e)
+            })?;
+
+        if let Some(existing) = existing {
+            if existing == *row {
+                return Ok(false);
+            }
+            tracing::warn!(
+                event_id = %row.event_id,
+                "insert_event_row_if_absent: conflict — same event_id, different content"
+            );
+            return Err(EventLogError::EventConflict {
+                event_id: row.event_id.clone(),
+            });
+        }
+
+        tx.execute(
+            "INSERT INTO event_log
+             (event_id, stream_id, event_type, section_name, payload, previous_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                row.event_id,
+                row.stream_id,
+                row.event_type,
+                row.section_name,
+                row.payload,
+                row.previous_id,
+                row.created_at
+            ],
+        )
+        .map_err(|e| {
+            tracing::warn!(error = ?e, event_id = %row.event_id, "insert_event_row_if_absent: INSERT failed");
+            EventLogError::Sqlite(e)
+        })?;
+        Ok(true)
+    }
+
+    /// Insert a `chapter_meta` row inside `tx` unless the chapter already exists.
+    ///
+    /// Existing chapters are left untouched (destination wins — the local
+    /// store's live metadata is never overwritten by a migration batch).
+    /// Returns `Ok(true)` if the row was inserted, `Ok(false)` if skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventLogError::Sqlite`] on SQL failure.
+    pub fn insert_chapter_meta_if_absent(
+        meta: &ChapterMeta,
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<bool, EventLogError> {
+        let count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM chapter_meta WHERE chapter_id = ?1",
+                rusqlite::params![meta.chapter_id.0],
+                |row| row.get(0),
+            )
+            .map_err(|e| {
+                tracing::warn!(error = ?e, chapter_id = %meta.chapter_id, "insert_chapter_meta_if_absent: COUNT failed");
+                EventLogError::Sqlite(e)
+            })?;
+        if count > 0 {
+            return Ok(false);
+        }
+
+        tx.execute(
+            "INSERT INTO chapter_meta
+             (chapter_id, schema_id, current_state, opened_at, closed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                meta.chapter_id.0,
+                meta.schema_id,
+                meta.current_state,
+                meta.opened_at,
+                meta.closed_at
+            ],
+        )
+        .map_err(|e| {
+            tracing::warn!(error = ?e, chapter_id = %meta.chapter_id, "insert_chapter_meta_if_absent: INSERT failed");
+            EventLogError::Sqlite(e)
+        })?;
+        Ok(true)
     }
 }

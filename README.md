@@ -20,7 +20,7 @@ Project の **正史** (= 判断 + 検証の流れ、 「再開・中断・路�
 
 **WIP — implementation in progress (ST7 complete)**. ST1 (EventLog SQLite primitive), ST2 (ChapterSchema parser + SchemaRegistry + built-in schema embed), ST3 (JournalCore schema-driven state transition engine + ChapterHandle typestate), ST4 (sealed `JournalProjection` trait + `FileProjection` dirty-tracking skeleton + `JournalCore` projection dispatch wiring), ST5 (`FileProjection` full implementation — content-hash dirty-skip + atomic rename + debounce + `SchemaRegistry` accessor helpers), ST6 (`JournalMcpServer` + all 15 `journal_*` MCP tools via `#[tool_router]` + stdio transport + `JournalCore` API extensions), and ST7 (`FileProjection` explicit-only render redesign + hash-check auto-backup guard + `journal_import` 16th tool + EventLog fifth event type `import` + test isolation via `new_with_config`) are implemented and tested.
 
-The MCP server binary (`crates/journal-mcp`) is now functional. Set `JOURNAL_PROJECT_ROOT` to your project directory and run the binary; it serves all 16 tools over stdio transport as specified in `docs/design.md §6` and `§10 Step 5`.
+The MCP server binary (`crates/journal-mcp`) is now functional. Set `JOURNAL_PROJECT_ROOT` to your project directory and run the binary; it serves all 20 tools over stdio transport as specified in `docs/design.md §6` and `§10 Step 5`.
 
 Key behaviour changes introduced in ST7:
 
@@ -95,7 +95,7 @@ journal-mcp/
 
 ## MCP Tools
 
-All 16 tools are registered in a single `#[tool_router] impl JournalMcpServer` block and served over stdio transport.
+All 20 tools are registered in a single `#[tool_router] impl JournalMcpServer` block and served over stdio transport.
 
 | Tool | Category | Description |
 |---|---|---|
@@ -108,6 +108,8 @@ All 16 tools are registered in a single `#[tool_router] impl JournalMcpServer` b
 | `journal_chapter_list` | read | List all chapters in Decision Log table format |
 | `journal_open_chapters` | read | List IDs of all currently open chapters |
 | `journal_progress_of` | read | Return Progress-section events for a chapter |
+| `journal_dump` | read | Render the entire journal to a single Markdown string (no file written on the server) |
+| `journal_info` | read | Return server runtime state (paths, schemas, version, startup time) |
 | `journal_schema_load` | schema | Load a YAML schema into the runtime L2 registry |
 | `journal_schema_list` | schema | List all registered schema IDs |
 | `journal_schema_show` | schema | Return the full YAML for a registered schema |
@@ -115,6 +117,8 @@ All 16 tools are registered in a single `#[tool_router] impl JournalMcpServer` b
 | `journal_projection_detach` | projection | Detach a named projection |
 | `journal_projection_rebuild` | projection | Replay all chapters through a named projection (explicit-only render trigger) |
 | `journal_import` | migration | Import a `journal-mcp-canonical-v1` markdown file atomically (all chapters land in `closed` state; chapter-ID collisions abort the entire import) |
+| `journal_export_events` | migration | Export the raw EventLog + chapter metadata as a `journal-events-v1` JSON string (event ids, timestamps, schema ids preserved; no file written on the server) |
+| `journal_import_events` | migration | Import a `journal-events-v1` payload passed inline over the wire; idempotent event-id dedup (identical rows skipped, same-id/different-content aborts the batch) — the sanctioned local → remote history migration path |
 
 ## License
 
