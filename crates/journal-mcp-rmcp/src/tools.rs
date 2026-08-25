@@ -1,4 +1,4 @@
-//! The 17 `#[tool]`-annotated MCP tool handlers for [`JournalMcpServer`],
+//! The 18 `#[tool]`-annotated MCP tool handlers for [`JournalMcpServer`],
 //! registered in a single `#[tool_router]` block (Crux #1: tool_router 一元
 //! ServerHandler 配線).
 
@@ -8,8 +8,8 @@ use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use crate::request::{
     JournalAppendProgressParams, JournalAppendSectionParams, JournalChapterListParams,
-    JournalCloseChapterParams, JournalGrepParams, JournalImportParams, JournalInfoResult,
-    JournalOpenChapterParams, JournalOpenChaptersParams, JournalProgressOfParams,
+    JournalCloseChapterParams, JournalDumpParams, JournalGrepParams, JournalImportParams,
+    JournalInfoResult, JournalOpenChapterParams, JournalOpenChaptersParams, JournalProgressOfParams,
     JournalProjectionAttachParams, JournalProjectionDetachParams, JournalProjectionRebuildParams,
     JournalSchemaListParams, JournalSchemaLoadParams, JournalSchemaShowParams, JournalTailParams,
 };
@@ -44,7 +44,7 @@ struct ChapterListRow {
 
 /// All journal-mcp MCP tools are registered in this single block.
 ///
-/// This satisfies Crux #1 (tool_router 一元 ServerHandler 配線): all 17
+/// This satisfies Crux #1 (tool_router 一元 ServerHandler 配線): all 18
 /// tools live here, and nowhere else.
 #[tool_router(vis = "pub(crate)")]
 impl JournalMcpServer {
@@ -480,6 +480,46 @@ impl JournalMcpServer {
                 .expect("Vec<serde_json::Value> serialises without error")
         }; // guard drops here
         Ok(json)
+    }
+
+    /// Render the entire journal to a single Markdown string.
+    ///
+    /// Render-to-string counterpart of the `FileProjection`: the rendered
+    /// `journal.md`-equivalent content is returned as the tool result and
+    /// **no file is written on the server**.  The caller (a local MCP host,
+    /// an AI session, or a forwarding layer like lds) decides where to
+    /// materialize it — this is what lets a remote journal daemon hand a
+    /// local file back to the client machine.
+    #[tool(
+        name = "journal_dump",
+        description = "Render the entire journal to a single Markdown string (journal.md \
+                       equivalent) and return it as the tool result — no file is written \
+                       on the server. Chapters are ordered oldest-first by chapter id. \
+                       Optional since (Unix epoch ms) filters chapters by opened_at. \
+                       Use this to materialize a local journal.md from a remote daemon.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn journal_dump(
+        &self,
+        Parameters(params): Parameters<JournalDumpParams>,
+    ) -> Result<String, String> {
+        let markdown = {
+            // SAFETY: see journal_open_chapter
+            let core_handle = self
+                .resolve_core(params.project_root.as_deref())
+                .map_err(|e| format!("resolve_core: {e}"))?;
+            let core = core_handle.lock().unwrap();
+            core.dump_markdown(params.since).map_err(|e| {
+                tracing::warn!(error = ?e, "journal_dump failed");
+                e.to_string()
+            })?
+        }; // guard drops here
+        Ok(markdown)
     }
 
     /// List all chapters in the journal as a summary table.
@@ -1052,20 +1092,20 @@ mod tests {
         assert!(workspace.exists(), "workspace should be created by new()");
     }
 
-    /// T3 (error path) — tool_router now returns exactly 17 tools after ST7.
+    /// T3 (error path) — tool_router now returns exactly 18 tools.
     ///
-    /// Updated from "exactly 16 tools" (ST7) to "exactly 17 tools" (journal_info)
-    /// by adding `journal_info` as the 17th tool.
+    /// Updated from "exactly 17 tools" (journal_info) to "exactly 18 tools"
+    /// by adding `journal_dump` (render-to-string, remote-mode primitive).
     ///
-    /// Verifies Crux #1: all 17 tools are wired into the single `#[tool_router]` block.
+    /// Verifies Crux #1: all 18 tools are wired into the single `#[tool_router]` block.
     #[test]
     fn test_st7_exactly_seventeen_tools() {
         let tmp = tempfile::TempDir::new().expect("TempDir::new should succeed");
         let server = make_server(&tmp);
         let count = server.tool_router.list_all().len();
         assert_eq!(
-            count, 17,
-            "ST7 tool_router should have exactly 17 tools (Crux #1), got {count}"
+            count, 18,
+            "tool_router should have exactly 18 tools (Crux #1), got {count}"
         );
     }
 
@@ -1172,7 +1212,7 @@ mod tests {
     // ST3 integration tests — Crux #1 final: 15 tool full registration assert
     // -----------------------------------------------------------------------
 
-    /// Canonical spelling of all 17 MCP tools in the tool_router (ST7 final).
+    /// Canonical spelling of all 18 MCP tools in the tool_router.
     ///
     /// This constant is the authoritative list.  Changing this list is a
     /// Crux #1 or Crux #2 violation and requires human review.
@@ -1190,6 +1230,8 @@ mod tests {
         "journal_tail",
         "journal_grep",
         "journal_chapter_list",
+        // remote-mode: render-to-string dump (1)
+        "journal_dump",
         // ST3: remaining tools (5)
         "journal_open_chapters",
         "journal_progress_of",
@@ -1202,7 +1244,7 @@ mod tests {
         "journal_info",
     ];
 
-    /// T1 (property) — Crux #1 final: all 17 tools are registered in the
+    /// T1 (property) — Crux #1 final: all 18 tools are registered in the
     /// single `#[tool_router] impl JournalMcpServer` block.
     ///
     /// This is the primary acceptance test for ST7 as a whole.
@@ -1214,8 +1256,8 @@ mod tests {
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert_eq!(
             tool_names.len(),
-            17,
-            "exactly 17 tools must be registered (Crux #1 ST7); got: {tool_names:?}"
+            18,
+            "exactly 18 tools must be registered (Crux #1); got: {tool_names:?}"
         );
         for &name in EXPECTED_TOOLS {
             assert!(

@@ -519,6 +519,65 @@ impl JournalCore {
         self.append_section(id, "Progress", line)
     }
 
+    /// Render the entire journal to a single Markdown string (render-to-string).
+    ///
+    /// This is the EventLog → Markdown path used by the `journal_dump` MCP
+    /// tool: unlike [`FileProjection`], **no file is written** — the rendered
+    /// content is returned to the caller, who decides where (and on which
+    /// machine) to materialize it.  This is the primitive that makes a remote
+    /// journal daemon viable: the daemon renders from its EventLog and the
+    /// client writes the file locally.
+    ///
+    /// Chapters are rendered in ascending chapter-id order (lexicographic —
+    /// for date-slug chapter ids this equals chronological order), matching
+    /// the file assembled by [`FileProjection`].  Both open and closed
+    /// chapters are included; a chapter whose schema is missing from the
+    /// registry is skipped with a warning (same policy as
+    /// [`FileProjection::rebuild_chapter`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `since` — if `Some(ms)`, only chapters with `opened_at >= ms` are rendered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError::EventLog`] if chapter enumeration or replay fails.
+    ///
+    /// [`FileProjection`]: crate::FileProjection
+    /// [`FileProjection::rebuild_chapter`]: crate::FileProjection
+    pub fn dump_markdown(&self, since: Option<i64>) -> Result<String, JournalError> {
+        let mut metas = self.log.all_chapter_metas()?;
+        metas.retain(|m| since.map_or(true, |ts| m.opened_at >= ts));
+        // all_chapter_metas returns newest first; the assembled document is
+        // oldest first (FileProjection BTreeMap order = ascending chapter_id).
+        metas.sort_by(|a, b| a.chapter_id.0.cmp(&b.chapter_id.0));
+
+        let mut out = String::new();
+        for meta in metas {
+            let Some(schema) = self.registry.get(&meta.schema_id) else {
+                tracing::warn!(
+                    target: "journal::core",
+                    schema_id = %meta.schema_id,
+                    chapter_id = %meta.chapter_id.0,
+                    "schema not found; skipping chapter in dump_markdown"
+                );
+                continue;
+            };
+            let chapter_header = schema.chapter_header().map(str::to_owned);
+            let section_header = schema.section_header().map(str::to_owned);
+            let section_order: Vec<String> = schema.section_order().to_vec();
+
+            let replay = self.log.chapter(&meta.chapter_id)?;
+            out.push_str(&crate::projection::file::render_chapter(
+                &replay,
+                chapter_header.as_deref(),
+                section_header.as_deref(),
+                &section_order,
+            ));
+        }
+        Ok(out)
+    }
+
     /// Return the `n` most-recently-opened chapters as full replays (newest first).
     ///
     /// Internally calls [`EventLog::all_chapter_metas`] (sorted by `opened_at DESC`)

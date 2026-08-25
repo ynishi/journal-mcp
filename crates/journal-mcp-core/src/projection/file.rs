@@ -251,7 +251,11 @@ impl JournalProjection for FileProjection {
 /// When `chapter_header` or `section_header` is `None` the fallback strings
 /// `"(schema lacks chapter header)"` / `"(schema lacks section header)"` are
 /// used so schema deficiencies are visible in the rendered output.
-fn render_chapter(
+///
+/// `pub(crate)` so that `JournalCore::dump_markdown` (the render-to-string
+/// path used by the `journal_dump` MCP tool) can reuse the exact same
+/// rendering logic without a `FileProjection` instance or any file IO.
+pub(crate) fn render_chapter(
     replay: &ChapterReplay,
     chapter_header: Option<&str>,
     section_header: Option<&str>,

@@ -312,3 +312,90 @@ fn test_hook_keyword_detect() {
         first.hint
     );
 }
+
+// ---------------------------------------------------------------------------
+// T5 — dump_markdown (render-to-string, journal_dump tool primitive)
+// ---------------------------------------------------------------------------
+
+/// T5a — dump_markdown renders all chapters oldest-first with schema templates.
+///
+/// Verifies:
+/// - Both chapters appear in the output (open chapters included).
+/// - Chapters are ordered ascending by chapter id (oldest first), even though
+///   `all_chapter_metas` returns newest first.
+/// - Chapter/section headers come from the schema templates and section
+///   bodies from the appended events.
+#[test]
+fn test_dump_markdown_renders_chapters_oldest_first() {
+    let (mut core, _dir) = make_core();
+
+    let id1 = core
+        .open_chapter("2026-06-13", "journal-mcp-canonical-v1")
+        .expect("open_chapter 2026-06-13 should succeed");
+    core.append_section(&id1, "Verified", "first-chapter-verified-body")
+        .expect("append Verified should succeed");
+
+    let id2 = core
+        .open_chapter("2026-06-14", "journal-mcp-canonical-v1")
+        .expect("open_chapter 2026-06-14 should succeed");
+    core.append_section(&id2, "Verified", "second-chapter-verified-body")
+        .expect("append Verified should succeed");
+
+    let dump = core
+        .dump_markdown(None)
+        .expect("dump_markdown should succeed");
+
+    // Schema-driven chapter headers ("## {date} — {name}" with both slots =
+    // chapter_id) and appended bodies must be present.
+    assert!(
+        dump.contains("## 2026-06-13 — 2026-06-13"),
+        "dump should contain the first chapter header, got:\n{dump}"
+    );
+    assert!(
+        dump.contains("### Verified"),
+        "dump should contain the schema-driven section header, got:\n{dump}"
+    );
+    assert!(dump.contains("first-chapter-verified-body"));
+    assert!(dump.contains("second-chapter-verified-body"));
+
+    // Oldest chapter renders before the newest one.
+    let pos1 = dump
+        .find("2026-06-13")
+        .expect("first chapter id should be present");
+    let pos2 = dump
+        .find("2026-06-14")
+        .expect("second chapter id should be present");
+    assert!(
+        pos1 < pos2,
+        "chapters must be ordered oldest-first: pos({pos1}) < pos({pos2})\n{dump}"
+    );
+}
+
+/// T5b — dump_markdown `since` filter excludes chapters opened before it.
+///
+/// Uses `i64::MAX` (nothing qualifies) and `None` (everything qualifies) as
+/// the two deterministic boundary cases — wall-clock `opened_at` values make
+/// intermediate cut-points non-deterministic in tests.
+#[test]
+fn test_dump_markdown_since_filter() {
+    let (mut core, _dir) = make_core();
+
+    let id = core
+        .open_chapter("2026-06-13", "journal-mcp-canonical-v1")
+        .expect("open_chapter should succeed");
+    core.append_section(&id, "Verified", "since-filter-body")
+        .expect("append Verified should succeed");
+
+    let all = core
+        .dump_markdown(None)
+        .expect("dump_markdown(None) should succeed");
+    assert!(all.contains("since-filter-body"));
+
+    let none = core
+        .dump_markdown(Some(i64::MAX))
+        .expect("dump_markdown(Some(MAX)) should succeed");
+    assert!(
+        none.is_empty(),
+        "since=i64::MAX should exclude every chapter, got:\n{none}"
+    );
+}

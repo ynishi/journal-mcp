@@ -144,6 +144,21 @@ pub struct JournalGrepParams {
     pub project_root: Option<String>,
 }
 
+/// Parameters for `journal_dump`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalDumpParams {
+    /// Optional start filter: only chapters opened at or after this Unix
+    /// epoch ms are included in the rendered output.
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// Optional per-call project_root override.  When `None`, the
+    /// startup-time default is used.  When `Some(path)`, the server
+    /// lazily opens (or reuses a cached) `JournalCore` rooted at the
+    /// given path and executes this call against it.
+    #[serde(default)]
+    pub project_root: Option<String>,
+}
+
 /// Parameters for `journal_chapter_list` (supports pagination).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct JournalChapterListParams {

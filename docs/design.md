@@ -291,6 +291,7 @@ transitions:
 | `journal_close_chapter` | 章 close。 schema の close transition の requires を strict check |
 | `journal_tail` | 末尾 N 章 fetch |
 | `journal_grep` | pattern + scope 検索 |
+| `journal_dump` | EventLog 全章を journal.md 相当の Markdown 文字列として render して返す (server 側 file write なし)。 remote daemon から client が local journal.md を materialize する経路。 optional `since` filter |
 | `journal_chapter_list` | 章一覧 (since filter)、 output form は table 形式 (`date` / `chapter_title` / `current_state` / `Decided 1 行 summary` / `link`) で返す (BP-2.5/5.3 Microsoft Decision Log table) |
 | `journal_progress_of` | 特定章の Progress 節 read |
 | `journal_open_chapters` | close 前の章一覧 |

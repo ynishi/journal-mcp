@@ -44,10 +44,13 @@ pub struct RunConfig {
 
 /// Construct a [`JournalMcpServer`] from `cfg` and serve it over stdio.
 ///
-/// # Crux #3
+/// # Crux #3 (revised)
 ///
-/// Wires `server.serve(stdio()).await?.waiting().await?` and must not be
-/// replaced with another transport (TCP / HTTP / unix socket).
+/// stdio is the **default** transport and this function wires exactly
+/// `server.serve(stdio()).await?.waiting().await?`.  The original v0.1.0
+/// invariant ("must not be replaced with another transport") is revised for
+/// remote mode: the streamable-HTTP daemon transport lives in the separate
+/// [`run_http`] entry point.  This function itself remains stdio-only.
 ///
 /// # Errors
 ///
@@ -59,6 +62,111 @@ pub async fn run(cfg: RunConfig) -> anyhow::Result<()> {
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Serve over streamable HTTP transport (multi-device / SSOT-daemon mode).
+///
+/// One central daemon owns the EventLog SQLite databases
+/// (`{project_root}/workspace/.journal.db` per project, via the per-call
+/// `project_root` override + `extra_cores` cache); remote devices connect as
+/// MCP clients to `http://<bind>/mcp`.  Because every device talks to the
+/// same single process, the existing single-writer storage model is
+/// preserved and no cross-device sync/conflict handling is needed.  Clients
+/// that want a local `journal.md` call the `journal_dump` tool and write the
+/// returned Markdown themselves — the daemon never writes files on the
+/// client's behalf.
+///
+/// # Security model
+///
+/// - Loopback bind (e.g. `127.0.0.1:8487`): token optional.  rmcp's default
+///   `Host` header validation (loopback-only) guards against DNS rebinding.
+/// - Non-loopback bind: `JOURNAL_MCP_HTTP_TOKEN` **must** be set or startup
+///   is refused.  When a token is set, every request must carry
+///   `Authorization: Bearer <token>`.  Host validation is disabled in this
+///   case (the bearer token replaces it); TLS termination, if desired, is a
+///   reverse-proxy concern.
+///
+/// # Errors
+///
+/// Returns an error if [`JournalMcpServer::new`] fails, the bind address is
+/// invalid, a non-loopback bind is requested without a token, or the HTTP
+/// server fails to start.
+pub async fn run_http(cfg: RunConfig, bind: &str) -> anyhow::Result<()> {
+    use std::sync::Arc;
+
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+
+    tracing::info!(project_root = ?cfg.project_root, "journal-mcp starting (http)");
+    let server = JournalMcpServer::new(cfg)?;
+
+    let addr: std::net::SocketAddr = bind
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid --bind address {bind:?}: {e}"))?;
+    let token = std::env::var("JOURNAL_MCP_HTTP_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .map(Arc::<str>::from);
+    let loopback = addr.ip().is_loopback();
+    if !loopback && token.is_none() {
+        anyhow::bail!(
+            "refusing to bind non-loopback address {addr} without JOURNAL_MCP_HTTP_TOKEN \
+             (set the token, or bind a loopback address)"
+        );
+    }
+
+    let mut http_config = StreamableHttpServerConfig::default();
+    if !loopback {
+        // Bearer auth replaces loopback Host validation for LAN/remote binds.
+        http_config.allowed_hosts.clear();
+    }
+    let service = StreamableHttpService::new(
+        move || Ok(server.clone()),
+        Arc::new(LocalSessionManager::default()),
+        http_config,
+    );
+
+    let mut router = axum::Router::new().nest_service("/mcp", service);
+    if let Some(token) = token {
+        router = router.layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let token = Arc::clone(&token);
+                async move {
+                    if bearer_token_matches(req.headers(), &token) {
+                        next.run(req).await
+                    } else {
+                        axum::response::IntoResponse::into_response((
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            "missing or invalid bearer token",
+                        ))
+                    }
+                }
+            },
+        ));
+    }
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!(%addr, auth = if loopback { "loopback" } else { "bearer-token" }, "serving MCP over streamable HTTP at /mcp");
+    axum::serve(listener, router).await?;
+    Ok(())
+}
+
+/// Constant-time comparison of the request's `Authorization: Bearer` value
+/// against the configured token.
+fn bearer_token_matches(headers: &axum::http::HeaderMap, token: &str) -> bool {
+    let Some(presented) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return false;
+    };
+    let (a, b) = (presented.as_bytes(), token.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -77,8 +185,10 @@ pub async fn run(cfg: RunConfig) -> anyhow::Result<()> {
 ///   registered in a single `#[tool_router] impl JournalMcpServer` block
 ///   (in `tools.rs`) and dispatched through `#[tool_handler] impl ServerHandler`
 ///   (below).
-/// * **Crux #3** (stdio transport 固定配線): [`run`] wires
-///   `server.serve(stdio()).await?.waiting().await?` and never uses another transport.
+/// * **Crux #3** (stdio default 配線, revised): [`run`] wires
+///   `server.serve(stdio()).await?.waiting().await?` and stays stdio-only;
+///   the streamable-HTTP daemon transport is the separate [`run_http`]
+///   entry point (remote mode).
 #[derive(Clone)]
 pub struct JournalMcpServer {
     /// ToolRouter is stored in the struct so that `list_all()` is available

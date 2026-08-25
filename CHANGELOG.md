@@ -9,7 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `journal_dump` MCP tool (18th tool): renders the entire journal to a single
+  Markdown string (journal.md equivalent) and returns it as the tool result —
+  no file is written on the server. Optional `since` (Unix epoch ms) filter
+  and per-call `project_root` override. Backing primitive:
+  `JournalCore::dump_markdown`. This is the remote-mode dump path: a client
+  talking to a remote daemon materializes its local `journal.md` from the
+  returned string.
+- `--mcp-http [--bind ADDR]` streamable HTTP daemon mode
+  (`journal_mcp_rmcp::run_http`). Default bind `127.0.0.1:8487`; non-loopback
+  binds require `JOURNAL_MCP_HTTP_TOKEN` (bearer auth, constant-time compare),
+  mirroring outline-mcp's SSOT-daemon transport.
+
 ### Changed
+
+- Crux #3 revised: stdio remains the default transport wired by `run`, but is
+  no longer the *only* transport — the streamable HTTP daemon lives in the
+  separate `run_http` entry point.
 
 ### Deprecated
 
