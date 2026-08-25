@@ -1,0 +1,9 @@
+# Keep the build context to what the Dockerfile actually COPYs
+# (Cargo.toml / Cargo.lock / crates). Everything below is either build
+# output or local working state that must never reach the builder.
+target
+workspace
+.worktrees
+.claude
+.mcp.json
+.git

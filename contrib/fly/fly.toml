@@ -1,13 +1,16 @@
 # fly.toml — host journal-mcp on Fly.io Machines (single machine + volume,
 # single-writer model preserved: every device talks to this one daemon).
 #
-# Usage (from the repo root — the Dockerfile is auto-detected there):
-#   fly deploy --config contrib/fly/fly.toml
+# One-shot deploy (idempotent, includes app/volume/secret setup + smoke):
+#   JOURNAL_FLY_APP=<your-app-name> bash contrib/fly/deploy.sh
 #
-# Before the first deploy:
-#   fly apps create <your-app-name>            # replace `app` below
-#   fly volumes create journal_data --region nrt --size 1
-#   fly secrets set JOURNAL_MCP_HTTP_TOKEN=<token>
+# Manual equivalent (from the repo root — the Dockerfile is auto-detected):
+#   fly apps create <your-app-name>
+#   fly volumes create journal_data --app <your-app-name> --region nrt --size 1
+#   fly secrets set --app <your-app-name> JOURNAL_MCP_HTTP_TOKEN=<token>
+#   fly deploy --config contrib/fly/fly.toml --app <your-app-name>
+#
+# Full walkthrough: docs/runbooks/fly-io-deploy.md
 #
 # Non-loopback bind refuses to start without JOURNAL_MCP_HTTP_TOKEN; every
 # request must carry `Authorization: Bearer <token>`. TLS terminates at the
@@ -17,8 +20,9 @@
 # address other projects by passing a per-call `project_root` under /data
 # (e.g. "/data/journal/<repo-name>") — one daemon, N EventLogs.
 #
-# `app` is a placeholder — create your own app first.
-app = "journal-dev-server"
+# `app` is a placeholder — deploy.sh overrides it via --app, or replace it
+# with your own app name for plain `fly deploy`.
+app = "your-journal-app"
 primary_region = "nrt"
 
 [processes]
