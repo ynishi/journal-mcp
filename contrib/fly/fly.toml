@@ -1,0 +1,48 @@
+# fly.toml — host journal-mcp on Fly.io Machines (single machine + volume,
+# single-writer model preserved: every device talks to this one daemon).
+#
+# Usage (from the repo root — the Dockerfile is auto-detected there):
+#   fly deploy --config contrib/fly/fly.toml
+#
+# Before the first deploy:
+#   fly apps create <your-app-name>            # replace `app` below
+#   fly volumes create journal_data --region nrt --size 1
+#   fly secrets set JOURNAL_MCP_HTTP_TOKEN=<token>
+#
+# Non-loopback bind refuses to start without JOURNAL_MCP_HTTP_TOKEN; every
+# request must carry `Authorization: Bearer <token>`. TLS terminates at the
+# Fly edge, so the container speaks plain HTTP.
+#
+# Multi-project layout: JOURNAL_PROJECT_ROOT is the default project; clients
+# address other projects by passing a per-call `project_root` under /data
+# (e.g. "/data/journal/<repo-name>") — one daemon, N EventLogs.
+#
+# `app` is a placeholder — create your own app first.
+app = "journal-dev-server"
+primary_region = "nrt"
+
+[processes]
+  app = "--mcp-http --bind 0.0.0.0:8487"
+
+[env]
+  # EventLog SQLite ({root}/workspace/.journal.db) + project-local schemas
+  # ({root}/.journal/schemas) live on the mounted volume.
+  JOURNAL_PROJECT_ROOT = "/data/journal/default"
+
+[[mounts]]
+  source = "journal_data"
+  destination = "/data"
+
+[http_service]
+  processes = ["app"]
+  internal_port = 8487
+  force_https = true
+  # A stateful daemon should not scale to zero or fan out: exactly one
+  # machine may own the volume / SQLite files.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

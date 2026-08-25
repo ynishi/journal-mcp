@@ -18,8 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned string.
 - `--mcp-http [--bind ADDR]` streamable HTTP daemon mode
   (`journal_mcp_rmcp::run_http`). Default bind `127.0.0.1:8487`; non-loopback
-  binds require `JOURNAL_MCP_HTTP_TOKEN` (bearer auth, constant-time compare),
-  mirroring outline-mcp's SSOT-daemon transport.
+  binds require `JOURNAL_MCP_HTTP_TOKEN` (bearer auth, constant-time compare).
+- Fly.io hosting layer: root `Dockerfile` (2-stage, `journal-mcp` release
+  binary) + `contrib/fly/fly.toml` (single machine + volume,
+  `auto_stop_machines = "off"` — SQLite single-writer;
+  `JOURNAL_PROJECT_ROOT` on the mounted volume, token via Fly secret).
 
 ### Changed
 
