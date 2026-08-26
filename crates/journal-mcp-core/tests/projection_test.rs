@@ -55,6 +55,7 @@ fn make_replay_with_events(id: &str, schema_id: &str, events: Vec<EventRow>) -> 
             current_state: "closed".to_owned(),
             opened_at: 0,
             closed_at: Some(0),
+            chapter_name: None,
         },
         events,
     }

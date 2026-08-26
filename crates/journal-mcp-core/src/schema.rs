@@ -248,6 +248,20 @@ pub struct ChapterSchema {
 }
 
 impl ChapterSchema {
+    /// Whether any transition requires `section` to be non-empty.
+    ///
+    /// Used to reject an empty body at append time rather than only at close
+    /// time: the close-time check still stands, but discovering "this section
+    /// may not be empty" only when closing means the caller learns about it
+    /// long after the write that caused it.
+    pub fn section_requires_non_empty(&self, section: &str) -> bool {
+        self.transitions.iter().any(|t| {
+            t.requires
+                .as_ref()
+                .is_some_and(|r| r.sections_non_empty.iter().any(|s| s == section))
+        })
+    }
+
     /// Parse a `ChapterSchema` from a YAML string.
     ///
     /// Returns `Err(SchemaError)` if the YAML is malformed, required fields
@@ -416,6 +430,8 @@ impl ChapterSchema {
     /// # Errors
     ///
     /// Returns [`SchemaError::SectionNotFound`] when the section is absent.
+    ///
+    /// See also [`ChapterSchema::section_requires_non_empty`].
     pub fn section(&self, name: &str) -> Result<&SectionSpec, SchemaError> {
         self.sections.get(name).ok_or_else(|| {
             tracing::warn!(

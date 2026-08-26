@@ -42,6 +42,13 @@ pub enum EventLogError {
         attempted: String,
     },
 
+    /// A chapter with this id already exists.
+    ///
+    /// Distinguished from a generic SQL failure so callers see a domain
+    /// error instead of a raw `UNIQUE constraint failed` string.
+    #[error("chapter already exists: {0}")]
+    ChapterAlreadyExists(String),
+
     /// An events-import row carries an `event_id` that already exists in this
     /// store with **different** content.
     ///
@@ -95,6 +102,10 @@ pub struct ChapterMeta {
     pub opened_at: i64,
     /// Unix epoch milliseconds when the chapter was closed, or `None` if still open.
     pub closed_at: Option<i64>,
+    /// Human-written chapter name, if the store recorded one. `chapter_id` is
+    /// its slug, so a header's `{name}` slot falls back to the slug when this
+    /// is `None` (rows written before the column existed).
+    pub chapter_name: Option<String>,
 }
 
 /// A single row from the `event_log` table.
@@ -170,8 +181,17 @@ CREATE TABLE IF NOT EXISTS chapter_meta (
     schema_id     TEXT NOT NULL,
     current_state TEXT NOT NULL,
     opened_at     INTEGER NOT NULL,
-    closed_at     INTEGER
+    closed_at     INTEGER,
+    chapter_name  TEXT
 ) STRICT";
+
+/// Additive migration for stores created before `chapter_name` existed.
+///
+/// The column holds the chapter's human name as written (`chapter_id` is its
+/// slug). Without it the projection had nothing to put in a header's `{name}`
+/// slot and rendered the slug twice, losing the original title. Older rows
+/// keep `NULL` and fall back to the slug, exactly as before.
+const MIGRATION_CHAPTER_NAME: &str = "ALTER TABLE chapter_meta ADD COLUMN chapter_name TEXT";
 
 /// BEFORE UPDATE trigger on `event_log` — raises ABORT to enforce append-only immutability.
 ///
@@ -239,6 +259,15 @@ impl EventLog {
             tracing::warn!(error = ?e, "EventLog::open failed to create chapter_meta table");
             e
         })?;
+        // Idempotent: on a store that already has the column SQLite reports a
+        // duplicate-column error, which is the success case for a re-open.
+        if let Err(e) = conn.execute_batch(MIGRATION_CHAPTER_NAME) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                tracing::warn!(error = ?e, "EventLog::open failed to add chapter_meta.chapter_name");
+                return Err(e.into());
+            }
+        }
 
         // Crux must_not_simplify: BEFORE UPDATE/BEFORE DELETE triggers on event_log only.
         // chapter_meta must NOT have these triggers (state-transition UPDATEs must succeed).
@@ -273,16 +302,25 @@ impl EventLog {
     /// # Arguments
     ///
     /// * `chapter_id` — date-slug or other chapter identifier (stored as `stream_id` in SQL).
+    /// * `chapter_name` — the name as written; `chapter_id` is its slug.
     /// * `schema_id` — schema identifier used to interpret this chapter's events.
     /// * `initial_state` — initial state for the chapter's state machine.
     ///
+    /// Both inserts run in **one transaction**: the `open` event and the
+    /// `chapter_meta` row appear together or not at all. Writing the event
+    /// first and the row second (as this used to) left an orphan `open` event
+    /// behind whenever the row insert failed — a failed open still polluted
+    /// the chapter's replay.
+    ///
     /// # Errors
     ///
-    /// Returns [`EventLogError::Sqlite`] on SQL failure, [`EventLogError::Time`] if the
-    /// system clock is before the Unix epoch, or [`EventLogError::Json`] on serialisation failure.
+    /// [`EventLogError::ChapterAlreadyExists`] when `chapter_id` is taken,
+    /// [`EventLogError::Sqlite`] on other SQL failure, [`EventLogError::Time`]
+    /// if the system clock is before the Unix epoch.
     pub fn append_chapter_open(
         &mut self,
         chapter_id: &str,
+        chapter_name: &str,
         schema_id: &str,
         initial_state: &str,
     ) -> Result<EventId, EventLogError> {
@@ -290,29 +328,47 @@ impl EventLog {
         let now = Self::now_ms()?;
         let payload = serde_json::json!({ "initial_state": initial_state }).to_string();
 
-        self.conn
-            .execute(
-                "INSERT INTO event_log
+        let tx = self.conn.transaction().map_err(|e| {
+            tracing::warn!(error = ?e, chapter_id, "append_chapter_open: begin transaction failed");
+            e
+        })?;
+
+        tx.execute(
+            "INSERT INTO event_log
                  (event_id, stream_id, event_type, section_name, payload, previous_id, created_at)
              VALUES (?1, ?2, 'open', NULL, ?3, NULL, ?4)",
-                rusqlite::params![event_id, chapter_id, payload, now],
-            )
-            .map_err(|e| {
-                tracing::warn!(error = ?e, chapter_id, "append_chapter_open: INSERT event_log failed");
-                e
-            })?;
+            rusqlite::params![event_id, chapter_id, payload, now],
+        )
+        .map_err(|e| {
+            tracing::warn!(error = ?e, chapter_id, "append_chapter_open: INSERT event_log failed");
+            e
+        })?;
 
-        self.conn
-            .execute(
-                "INSERT INTO chapter_meta
-                 (chapter_id, schema_id, current_state, opened_at, closed_at)
-             VALUES (?1, ?2, ?3, ?4, NULL)",
-                rusqlite::params![chapter_id, schema_id, initial_state, now],
-            )
-            .map_err(|e| {
-                tracing::warn!(error = ?e, chapter_id, "append_chapter_open: INSERT chapter_meta failed");
-                e
-            })?;
+        tx.execute(
+            "INSERT INTO chapter_meta
+                 (chapter_id, schema_id, current_state, opened_at, closed_at, chapter_name)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+            rusqlite::params![chapter_id, schema_id, initial_state, now, chapter_name],
+        )
+        .map_err(|e| {
+            tracing::warn!(error = ?e, chapter_id, "append_chapter_open: INSERT chapter_meta failed");
+            // A taken chapter_id is an ordinary caller mistake, not an
+            // internal fault: report it as such instead of leaking the raw
+            // `UNIQUE constraint failed: chapter_meta.chapter_id`.
+            if matches!(
+                e.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            ) {
+                EventLogError::ChapterAlreadyExists(chapter_id.to_owned())
+            } else {
+                EventLogError::Sqlite(e)
+            }
+        })?;
+
+        tx.commit().map_err(|e| {
+            tracing::warn!(error = ?e, chapter_id, "append_chapter_open: commit failed");
+            e
+        })?;
 
         Ok(EventId(event_id))
     }
@@ -442,7 +498,7 @@ impl EventLog {
         let meta = self
             .conn
             .query_row(
-                "SELECT chapter_id, schema_id, current_state, opened_at, closed_at
+                "SELECT chapter_id, schema_id, current_state, opened_at, closed_at, chapter_name
                    FROM chapter_meta
                   WHERE chapter_id = ?1",
                 rusqlite::params![chapter_id.0],
@@ -453,6 +509,7 @@ impl EventLog {
                         current_state: row.get(2)?,
                         opened_at: row.get(3)?,
                         closed_at: row.get(4)?,
+                        chapter_name: row.get(5)?,
                     })
                 },
             )
@@ -636,7 +693,7 @@ impl EventLog {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT chapter_id, schema_id, current_state, opened_at, closed_at
+                "SELECT chapter_id, schema_id, current_state, opened_at, closed_at, chapter_name
                FROM chapter_meta
               ORDER BY opened_at DESC",
             )
@@ -653,6 +710,7 @@ impl EventLog {
                     current_state: row.get(2)?,
                     opened_at: row.get(3)?,
                     closed_at: row.get(4)?,
+                    chapter_name: row.get(5)?,
                 })
             })
             .map_err(|e| {
@@ -802,11 +860,19 @@ impl EventLog {
                 continue;
             }
 
+            // The payload carries the heading as written; `chapter_id` is its
+            // slug. Recording both is what lets the projection print the
+            // original title instead of the slug twice.
+            let chapter_name = chapter
+                .get("chapter_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(chapter_id);
+
             tx.execute(
                 "INSERT INTO chapter_meta
-                 (chapter_id, schema_id, current_state, opened_at, closed_at)
-             VALUES (?1, ?2, 'closed', ?3, ?3)",
-                rusqlite::params![chapter_id, schema_id, now],
+                 (chapter_id, schema_id, current_state, opened_at, closed_at, chapter_name)
+             VALUES (?1, ?2, 'closed', ?3, ?3, ?4)",
+                rusqlite::params![chapter_id, schema_id, now, chapter_name],
             )
             .map_err(|e| {
                 tracing::warn!(error = ?e, chapter_id, "append_import: INSERT chapter_meta failed");
@@ -1000,14 +1066,15 @@ impl EventLog {
 
         tx.execute(
             "INSERT INTO chapter_meta
-             (chapter_id, schema_id, current_state, opened_at, closed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+             (chapter_id, schema_id, current_state, opened_at, closed_at, chapter_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 meta.chapter_id.0,
                 meta.schema_id,
                 meta.current_state,
                 meta.opened_at,
-                meta.closed_at
+                meta.closed_at,
+                meta.chapter_name
             ],
         )
         .map_err(|e| {

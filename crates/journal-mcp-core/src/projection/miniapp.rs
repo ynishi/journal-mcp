@@ -457,6 +457,7 @@ mod tests {
                 current_state: "closed".to_owned(),
                 opened_at: 1_000_000_000,
                 closed_at: Some(1_000_000_500),
+                chapter_name: None,
             },
             events,
         }

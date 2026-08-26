@@ -24,7 +24,7 @@ fn test_happy_path_append_and_replay() {
 
     let chapter_id = ChapterId("2026-06-13".to_string());
 
-    log.append_chapter_open("2026-06-13", "daily-v1", "open")
+    log.append_chapter_open("2026-06-13", "2026-06-13", "daily-v1", "open")
         .expect("append_chapter_open should succeed");
 
     // Sleep 1 ms between appends to guarantee ULID lexicographic order.
@@ -115,7 +115,7 @@ fn test_immutability_trigger_aborts_update_and_delete() {
 
     let mut log = EventLog::open(&db_path).expect("open should succeed");
 
-    log.append_chapter_open("ch-immutable", "schema-v1", "open")
+    log.append_chapter_open("ch-immutable", "ch-immutable", "schema-v1", "open")
         .expect("append_chapter_open should succeed");
 
     // Open a separate raw connection to the same database.
@@ -169,8 +169,13 @@ fn test_chapter_meta_state_transition() {
     let chapter_id = ChapterId("2026-06-13-transition".to_string());
 
     // After open: state is "open", closed_at is None.
-    log.append_chapter_open("2026-06-13-transition", "schema-v1", "open")
-        .expect("append_chapter_open should succeed");
+    log.append_chapter_open(
+        "2026-06-13-transition",
+        "2026-06-13-transition",
+        "schema-v1",
+        "open",
+    )
+    .expect("append_chapter_open should succeed");
 
     let replay = log.chapter(&chapter_id).expect("chapter should exist");
     assert_eq!(replay.meta.current_state, "open");

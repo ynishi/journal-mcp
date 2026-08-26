@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The projection now shows what the EventLog holds. Rendering dropped content
+  in four ways, all of them silent:
+  - **Every append survives.** Bodies were collapsed to the last append per
+    section, so a section written to more than once lost everything but its
+    final entry.
+  - **Sections outside the schema render** (after the schema-declared ones)
+    instead of being discarded. They can only enter through an import path —
+    `append_section` still rejects them — and dropping them made a chapter
+    whose sections were all schema-external render as an empty chapter.
+  - **Untouched sections emit no heading.** Every schema section used to be
+    printed empty, which inflated the file and materialised sections that
+    never existed when the projection was read back.
+  - **Bodies are escaped.** A body line starting with `#` was emitted as a
+    heading, so re-importing the projection split the chapter or invented
+    sections; the importer now also honours fenced code blocks and the
+    escaped form. Round-trip of a rendered chapter is covered by a test.
+- Chapter headers carry the chapter's written name. `chapter_meta` gained a
+  `chapter_name` column (added in place on open, so existing stores migrate
+  without a dump/restore); rows predating it fall back to the slug, which is
+  what both header slots used to receive — rendering `## <id> — <id>`.
+- Opening a chapter is atomic. The `open` event and the `chapter_meta` row are
+  written in one transaction, so a rejected open no longer leaves an orphan
+  `open` event in the chapter's replay.
+- A duplicate chapter id returns `chapter already exists: <id>` instead of
+  leaking `UNIQUE constraint failed: chapter_meta.chapter_id`.
+- An empty body for a section the schema requires non-empty is rejected at
+  `append_section` rather than only at `close_chapter`, so the caller learns
+  at the write that caused it. The close-time requirement is unchanged.
+
+### Changed
+
+- `journal_import_events` reports `schemas_unknown`: schema ids the imported
+  chapters reference that the destination store has not loaded. Import stays
+  permissive by design (it is the migration path), but such chapters render as
+  nothing until the schema is loaded, so the import now says so instead of
+  letting them disappear. Loading the schema afterwards is enough — no
+  re-import needed.
+
 ## [0.8.0] - 2026-08-25
 
 ### Added

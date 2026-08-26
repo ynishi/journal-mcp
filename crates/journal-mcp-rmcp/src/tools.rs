@@ -987,7 +987,11 @@ impl JournalMcpServer {
                        Content is passed inline — works against a remote daemon. Idempotent: \
                        rows dedup by event_id (identical rows skipped); a same-id row with \
                        different content aborts and rolls back the whole batch. Returns a JSON \
-                       report {chapters_inserted, chapters_skipped, events_inserted, events_skipped}. \
+                       report {chapters_inserted, chapters_skipped, events_inserted, events_skipped, \
+                       schemas_unknown}. schemas_unknown lists schema ids the imported chapters \
+                       reference that this store has not loaded — those chapters are stored but \
+                       render as nothing until the schema is loaded (journal_schema_load); no \
+                       re-import is needed afterwards. \
                        Does NOT trigger projection rebuild (call journal_projection_rebuild explicitly).",
         annotations(
             read_only_hint = false,
@@ -1016,6 +1020,7 @@ impl JournalMcpServer {
             "chapters_skipped": report.chapters_skipped,
             "events_inserted": report.events_inserted,
             "events_skipped": report.events_skipped,
+            "schemas_unknown": report.schemas_unknown,
         })
         .to_string())
     }

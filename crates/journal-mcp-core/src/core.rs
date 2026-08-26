@@ -159,6 +159,16 @@ pub struct ImportEventsReport {
     pub events_inserted: usize,
     /// `event_log` rows skipped as identical duplicates.
     pub events_skipped: usize,
+    /// Schema ids referenced by imported chapters that this store's registry
+    /// does not know, de-duplicated and sorted.
+    ///
+    /// Import stays permissive on purpose — it is the migration path, and
+    /// refusing history because its schema has not been loaded yet would make
+    /// migration impossible. But a chapter whose schema is missing is silently
+    /// skipped by every rendering path, so the import reports it instead of
+    /// letting it disappear: load the schema (`journal_schema_load`) and the
+    /// chapters become visible without re-importing.
+    pub schemas_unknown: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +273,11 @@ impl JournalCore {
 
         // Crux: EventLog SoT append delegation — ALL persistent writes go through
         // self.log.append_chapter_open; no direct SQL here.
-        self.log.append_chapter_open(name, schema_id, initial)?;
+        // `name` doubles as the chapter's id and its written name on this
+        // path (no slugging happens here); the import path slugs the id and
+        // records the original name separately.
+        self.log
+            .append_chapter_open(name, name, schema_id, initial)?;
         Ok(ChapterId(name.to_owned()))
     }
 
@@ -372,6 +386,22 @@ impl JournalCore {
             );
             e
         })?;
+
+        // Reject an empty body for a section the schema requires to be
+        // non-empty, at the moment it is written. The close-time check is
+        // still the authority on chapter completeness; this one just stops
+        // the caller from carrying a doomed write until then.
+        if body.trim().is_empty() && schema.section_requires_non_empty(section_name) {
+            tracing::warn!(
+                target: "journal::core",
+                chapter_id = %id,
+                section = section_name,
+                "append_section: empty body for a section the schema requires non-empty"
+            );
+            return Err(JournalError::RequiresSectionsNonEmpty {
+                section: section_name.to_owned(),
+            });
+        }
 
         if section_spec.append_policy == Some(AppendPolicy::AppendOnce) {
             let count = self.log.section_count(id, section_name).map_err(|e| {
@@ -928,7 +958,41 @@ impl JournalCore {
         let mut chapters: Vec<ChapterAcc> = Vec::new();
         let mut current_chapter: Option<ChapterAcc> = None;
 
-        for line in content.lines() {
+        // Headings only count as structure outside fenced code blocks, and a
+        // backslash-escaped `\#` is body text the renderer neutralised on the
+        // way out (see `projection::file::escape_body`). Without either rule a
+        // body that merely *mentions* a heading split its own chapter in two
+        // when the projection was read back.
+        let mut in_fence = false;
+        for raw_line in content.lines() {
+            let fence_delim = {
+                let t = raw_line.trim_start();
+                t.starts_with("```") || t.starts_with("~~~")
+            };
+            if fence_delim {
+                in_fence = !in_fence;
+            }
+            let line = if in_fence || fence_delim {
+                raw_line
+            } else if let Some(rest) = raw_line.strip_prefix("\\#") {
+                // Unescape and treat as body, never as structure.
+                if let Some(ref mut ch) = current_chapter {
+                    if let Some(ref mut sec) = ch.current_section {
+                        sec.lines.push(format!("#{rest}"));
+                    }
+                }
+                continue;
+            } else {
+                raw_line
+            };
+            if in_fence || fence_delim {
+                if let Some(ref mut ch) = current_chapter {
+                    if let Some(ref mut sec) = ch.current_section {
+                        sec.lines.push(line.to_owned());
+                    }
+                }
+                continue;
+            }
             if let Some(h2) = line.strip_prefix("## ") {
                 // Flush any in-progress section into the current chapter.
                 if let Some(ref mut ch) = current_chapter {
@@ -1167,6 +1231,7 @@ impl JournalCore {
                     "current_state": m.current_state,
                     "opened_at": m.opened_at,
                     "closed_at": m.closed_at,
+                    "chapter_name": m.chapter_name,
                 })
             })
             .collect();
@@ -1270,6 +1335,9 @@ impl JournalCore {
                 current_state: req_str(m, "current_state", &ctx)?,
                 opened_at: req_i64(m, "opened_at", &ctx)?,
                 closed_at: m.get("closed_at").and_then(|v| v.as_i64()),
+                // Absent in payloads produced before the column existed —
+                // such chapters keep falling back to their slug.
+                chapter_name: opt_str(m, "chapter_name"),
             });
         }
         let mut rows: Vec<crate::event_log::RawEventRow> = Vec::with_capacity(events_json.len());
@@ -1287,11 +1355,30 @@ impl JournalCore {
         }
 
         // ── Atomic transaction: chapter_meta first, then events ─────────────
+        // Chapters whose schema this store cannot resolve would render as
+        // nothing at all (every projection skips them), so surface them in the
+        // report rather than importing them into invisibility.
+        let mut schemas_unknown: Vec<String> = metas
+            .iter()
+            .map(|m| m.schema_id.clone())
+            .filter(|s| self.registry.get(s).is_none())
+            .collect();
+        schemas_unknown.sort();
+        schemas_unknown.dedup();
+        if !schemas_unknown.is_empty() {
+            tracing::warn!(
+                target: "journal::core",
+                schemas = ?schemas_unknown,
+                "import_events: imported chapters reference schemas this store does not have"
+            );
+        }
+
         let mut report = ImportEventsReport {
             chapters_inserted: 0,
             chapters_skipped: 0,
             events_inserted: 0,
             events_skipped: 0,
+            schemas_unknown,
         };
         {
             let tx = self.log.transaction()?;
@@ -2031,5 +2118,134 @@ also valid
             .import_events("{\"format\":\"something-else\"}")
             .expect_err("wrong format must fail");
         assert!(err.to_string().contains("unsupported format"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Projection fidelity: what the EventLog holds is what the render shows
+    // -----------------------------------------------------------------------
+
+    /// Every append to a section survives the render.
+    ///
+    /// Bodies used to be collapsed to the last append per section, so earlier
+    /// appends vanished from the projection while the EventLog kept them.
+    #[test]
+    fn test_render_keeps_every_append() {
+        let (mut core, _dir) = make_core_for_test();
+        let id = core
+            .open_chapter("2026-08-26-multi", "journal-mcp-canonical-v1")
+            .expect("open_chapter");
+        for line in ["first", "second", "third"] {
+            core.append_section(&id, "Verified", line)
+                .expect("append should succeed");
+        }
+        let md = core.dump_markdown(None).expect("dump");
+        for line in ["first", "second", "third"] {
+            assert!(md.contains(line), "render dropped {line:?}:\n{md}");
+        }
+    }
+
+    /// A section nobody wrote to produces no heading, and the chapter header
+    /// carries the written name rather than the slug twice.
+    #[test]
+    fn test_render_omits_untouched_sections_and_names_the_chapter() {
+        let (mut core, _dir) = make_core_for_test();
+        let id = core
+            .open_chapter("2026-08-26-sparse", "journal-mcp-canonical-v1")
+            .expect("open_chapter");
+        core.append_section(&id, "Verified", "only this one")
+            .expect("append");
+        let md = core.dump_markdown(None).expect("dump");
+        assert!(md.contains("### Verified"), "written section must appear");
+        assert!(
+            !md.contains("### Decided"),
+            "untouched section must not emit a heading:\n{md}"
+        );
+        assert!(
+            md.contains("2026-08-26-sparse"),
+            "header must name the chapter:\n{md}"
+        );
+    }
+
+    /// A body that mentions a heading stays inside its own section across a
+    /// render → import round-trip, instead of splitting the chapter in two.
+    #[test]
+    fn test_render_import_roundtrip_survives_heading_in_body() {
+        let (mut core, dir) = make_core_for_test();
+        let id = core
+            .open_chapter("2026-08-26-roundtrip", "journal-mcp-canonical-v1")
+            .expect("open_chapter");
+        core.append_section(
+            &id,
+            "Verified",
+            "line one\n## not a chapter\n### not a section",
+        )
+        .expect("append");
+        let md = core.dump_markdown(None).expect("dump");
+
+        let path = dir.path().join("roundtrip.md");
+        std::fs::write(&path, &md).expect("write rendered markdown");
+        let (mut dst, _dst_dir) = make_core_for_test();
+        let imported = dst.import_chapter(&path).expect("re-import the projection");
+        assert_eq!(
+            imported.len(),
+            1,
+            "the projection must import as one chapter, got: {imported:?}"
+        );
+        let round = dst.dump_markdown(None).expect("dump destination");
+        assert!(
+            round.contains("not a chapter"),
+            "body text must survive the round-trip:\n{round}"
+        );
+    }
+
+    /// Sections the schema does not declare still render (they can only enter
+    /// through an import path, and dropping them silently made the EventLog
+    /// and the projection disagree).
+    #[test]
+    fn test_render_shows_sections_outside_the_schema() {
+        let (mut core, dir) = make_core_for_test();
+        let path = dir.path().join("extra.md");
+        std::fs::write(
+            &path,
+            "## 2026-08-26-extra\n\n### Verified\nin schema\n\n### NotInSchema\noutside schema\n",
+        )
+        .expect("write source markdown");
+        core.import_chapter(&path).expect("import");
+        let md = core.dump_markdown(None).expect("dump");
+        assert!(
+            md.contains("outside schema"),
+            "schema-external body must render:\n{md}"
+        );
+        assert!(
+            md.contains("### NotInSchema"),
+            "its heading must render too:\n{md}"
+        );
+    }
+
+    /// A rejected `open` leaves no trace: the event and the metadata row are
+    /// written together or not at all.
+    #[test]
+    fn test_failed_open_leaves_no_orphan_event() {
+        let (mut core, _dir) = make_core_for_test();
+        core.open_chapter("2026-08-26-dup", "journal-mcp-canonical-v1")
+            .expect("first open");
+        let err = core
+            .open_chapter("2026-08-26-dup", "journal-mcp-canonical-v1")
+            .expect_err("second open of the same id must fail");
+        assert!(
+            err.to_string().contains("chapter already exists"),
+            "raw SQL constraint text must not leak: {err}"
+        );
+
+        let replay = core
+            .log
+            .chapter(&ChapterId("2026-08-26-dup".to_owned()))
+            .expect("replay");
+        let opens = replay
+            .events
+            .iter()
+            .filter(|e| e.event_type == "open")
+            .count();
+        assert_eq!(opens, 1, "the failed open must not have appended an event");
     }
 }

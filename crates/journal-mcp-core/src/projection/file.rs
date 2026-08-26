@@ -263,49 +263,114 @@ pub(crate) fn render_chapter(
 ) -> String {
     let chapter_id = &replay.meta.chapter_id.0;
 
-    // Expand chapter header template
+    // Expand chapter header template. `{name}` is the chapter's written name
+    // when the store recorded one; older rows (and stores predating the
+    // column) fall back to the slug, which is what both slots used to get —
+    // rendering `## <id> — <id>` and losing the title.
     let header_template = chapter_header.unwrap_or("(schema lacks chapter header)");
+    let chapter_name = replay
+        .meta
+        .chapter_name
+        .as_deref()
+        .filter(|n| !n.is_empty())
+        .unwrap_or(chapter_id);
     let header = header_template
         .replace("{date}", chapter_id)
-        .replace("{name}", chapter_id);
+        .replace("{name}", chapter_name);
 
-    // Build a lookup: section_name → body text (from event payloads)
+    // Build a lookup: section_name → every body appended to it, in order
     let section_bodies = collect_section_bodies(replay);
+    let sec_template = section_header.unwrap_or("(schema lacks section header)");
 
     let mut out = String::new();
     out.push_str(&header);
     out.push('\n');
     out.push('\n');
 
-    // Emit sections in schema-declared order
-    for section_name in section_order {
-        let sec_template = section_header.unwrap_or("(schema lacks section header)");
-        let sec_heading = sec_template.replace("{section_name}", section_name);
-
-        let body = section_bodies
-            .get(section_name.as_str())
-            .map(String::as_str)
-            .unwrap_or("");
-
-        out.push_str(&sec_heading);
+    fn emit(sec_template: &str, section_name: &str, bodies: &[String], out: &mut String) {
+        out.push_str(&sec_template.replace("{section_name}", section_name));
         out.push('\n');
-        if !body.is_empty() {
-            out.push_str(body);
+        for body in bodies {
+            out.push_str(&escape_body(body));
             out.push('\n');
         }
         out.push('\n');
     }
 
+    // Schema-declared sections first, in schema order. A section nobody wrote
+    // to is skipped entirely: emitting its heading anyway inflated the
+    // projection with empty headings that a re-import then materialised as
+    // real (empty) sections.
+    for section_name in section_order {
+        if let Some(bodies) = section_bodies.get(section_name.as_str()) {
+            emit(sec_template, section_name, bodies, &mut out);
+        }
+    }
+
+    // Sections the schema does not declare are appended after the schema ones
+    // rather than dropped. They can only enter through the import paths
+    // (`append_section` rejects them), and silently omitting them made the
+    // EventLog and the projection disagree — a chapter whose sections were all
+    // schema-external rendered as an empty chapter.
+    let mut extra: Vec<&String> = section_bodies
+        .keys()
+        .filter(|name| !section_order.iter().any(|s| s == *name))
+        .collect();
+    extra.sort();
+    for section_name in extra {
+        emit(
+            sec_template,
+            section_name,
+            &section_bodies[section_name],
+            &mut out,
+        );
+    }
+
     out
 }
 
-/// Extract section bodies from `replay.events`.
+/// Escape a section body so its content cannot be mistaken for structure.
 ///
-/// Each `append_section` event payload is JSON `{"body": "..."}`.  We collect
-/// the last body written for each section name.  Follows the same pattern as
-/// `core.rs::body_is_empty`.
-fn collect_section_bodies(replay: &ChapterReplay) -> HashMap<String, String> {
-    let mut bodies: HashMap<String, String> = HashMap::new();
+/// A body line starting with `#` is a heading to any markdown reader — and to
+/// this crate's own importer, which would split the surrounding chapter in two
+/// (or invent sections) when the projection is read back. Prefixing the `#`
+/// with a backslash keeps the rendered text readable while removing its
+/// structural meaning. Lines inside fenced code blocks are left alone: a `#`
+/// there is already inert.
+fn escape_body(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut in_fence = false;
+    for (i, line) in body.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            out.push_str(line);
+            continue;
+        }
+        if !in_fence && trimmed.starts_with('#') {
+            let indent = &line[..line.len() - trimmed.len()];
+            out.push_str(indent);
+            out.push('\\');
+            out.push_str(trimmed);
+            continue;
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// Extract section bodies from `replay.events`, keeping **every** append.
+///
+/// Each `append_section` event payload is JSON `{"body": "..."}`. Sections may
+/// legitimately be appended to more than once (that is what an append-only log
+/// is for), so bodies accumulate per section name in event order. Collapsing
+/// them to the last one — as this used to do — dropped earlier appends from the
+/// projection while the EventLog still held them.
+fn collect_section_bodies(replay: &ChapterReplay) -> HashMap<String, Vec<String>> {
+    let mut bodies: HashMap<String, Vec<String>> = HashMap::new();
 
     for event in &replay.events {
         // Payload shape: {"body": "..."} — same as core.rs body_is_empty
@@ -316,7 +381,7 @@ fn collect_section_bodies(replay: &ChapterReplay) -> HashMap<String, String> {
 
         if !body_text.is_empty() {
             if let Some(name) = event.section_name.clone() {
-                bodies.insert(name, body_text);
+                bodies.entry(name).or_default().push(body_text);
             }
         }
     }

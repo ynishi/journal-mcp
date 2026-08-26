@@ -215,21 +215,42 @@ fn test_close_requires_sections_present() {
     );
 }
 
-/// T3b — close_chapter fails when a `sections_non_empty` section has an empty body.
+/// T3b — an empty body is rejected at append time for a `sections_non_empty`
+/// section, and the chapter stays writable afterwards.
 ///
-/// Appends all 5 required sections but passes an empty string for `Verified`.
-/// The schema requires `Verified` to be non-empty (`sections_non_empty`).
+/// The rejection used to happen only at `close_chapter`, so a caller learned
+/// that a section may not be empty long after the write that caused it. The
+/// close-time requirement itself is unchanged (its sibling check is covered by
+/// `test_close_requires_sections_present`) — this pins the earlier failure point.
 #[test]
-fn test_close_requires_sections_non_empty() {
+fn test_append_rejects_empty_body_for_non_empty_section() {
     let (mut core, _dir) = make_core();
 
     let id = core
         .open_chapter("t3b-chapter", "journal-mcp-canonical-v1")
         .expect("open_chapter should succeed");
 
-    // Append Verified with empty body.
-    core.append_section(&id, "Verified", "")
-        .expect("append empty Verified should succeed at EventLog level");
+    let err = core
+        .append_section(&id, "Verified", "")
+        .expect_err("empty body for a sections_non_empty section must fail at append time");
+    assert!(
+        matches!(
+            err,
+            JournalError::RequiresSectionsNonEmpty { ref section } if section == "Verified"
+        ),
+        "expected RequiresSectionsNonEmpty for Verified, got: {err:?}"
+    );
+
+    // Whitespace-only is the same thing.
+    assert!(
+        core.append_section(&id, "Verified", "   \n  ").is_err(),
+        "whitespace-only body must be rejected too"
+    );
+
+    // The rejection must not have consumed the chapter: a real body still lands
+    // and the chapter closes normally.
+    core.append_section(&id, "Verified", "cargo test passes")
+        .expect("non-empty Verified should succeed after the rejections");
     core.append_section(&id, "Done", "commit abc123")
         .expect("append Done should succeed");
     core.append_section(&id, "Decided", "schema helpers on schema.rs")
@@ -238,19 +259,8 @@ fn test_close_requires_sections_non_empty() {
         .expect("append Not Done should succeed");
     core.append_section(&id, "Issues touched", "st3-journal-core")
         .expect("append Issues touched should succeed");
-
-    // close_chapter must fail because Verified body is empty.
-    let err = core
-        .close_chapter(&id)
-        .expect_err("close with empty Verified body must fail");
-
-    assert!(
-        matches!(
-            err,
-            JournalError::RequiresSectionsNonEmpty { ref section } if section == "Verified"
-        ),
-        "expected RequiresSectionsNonEmpty for Verified, got: {err:?}"
-    );
+    core.close_chapter(&id)
+        .expect("close should succeed once every required section has a body");
 }
 
 // ---------------------------------------------------------------------------
